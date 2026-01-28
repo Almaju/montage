@@ -1,5 +1,6 @@
 mod audio;
 mod config;
+mod ollama;
 mod project;
 mod prompt;
 mod video;
@@ -62,7 +63,7 @@ enum AppState {
 impl MainView {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = AppConfig::load();
-        let prompt = cx.new(|_cx| PromptInput::new());
+        let prompt = cx.new(PromptInput::new);
         
         // Subscribe to prompt events
         cx.subscribe(&prompt, |this, _prompt, event: &PromptEvent, cx| {
@@ -160,10 +161,86 @@ impl MainView {
                 self.project.metadata.name = name;
                 cx.notify();
             }
+            Command::Text(text) => {
+                // Send to Ollama for parsing
+                self.process_with_ollama(text, cx);
+            }
             Command::Unknown(text) => {
                 if !text.is_empty() {
                     tracing::info!("Unknown command: {}", text);
                 }
+            }
+        }
+    }
+    
+    fn process_with_ollama(&mut self, text: String, cx: &mut Context<Self>) {
+        // Set processing state
+        self.prompt.update(cx, |prompt, cx| {
+            prompt.set_processing(true);
+            cx.notify();
+        });
+        
+        tracing::info!("Sending to Ollama: {}", text);
+        
+        cx.spawn(async move |this, cx| {
+            let result = ollama::parse_command(&text).await;
+            
+            let _ = this.update(cx, |this, cx| {
+                // Clear processing state
+                this.prompt.update(cx, |prompt, cx| {
+                    prompt.set_processing(false);
+                    cx.notify();
+                });
+                
+                match result {
+                    Ok(action) => {
+                        tracing::info!("Ollama parsed: {:?}", action);
+                        this.handle_ollama_action(action, cx);
+                    }
+                    Err(e) => {
+                        tracing::error!("Ollama error: {}", e);
+                        // Fallback: treat as clip description if Ollama fails
+                        tracing::info!("Ollama unavailable, treating as note: {}", text);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    
+    fn handle_ollama_action(&mut self, action: ollama::ParsedAction, cx: &mut Context<Self>) {
+        use ollama::ParsedAction;
+        
+        match action {
+            ParsedAction::AddClip { description } => {
+                tracing::info!("AI wants to add clip: {}", description);
+                // For now, just log - in future, could prompt for file
+            }
+            ParsedAction::SetProjectName { name } => {
+                self.project.metadata.name = name.clone();
+                tracing::info!("Project renamed to: {}", name);
+                cx.notify();
+            }
+            ParsedAction::MarkRange { description, start_seconds, end_seconds } => {
+                tracing::info!(
+                    "AI marked range '{}': {:?} - {:?}",
+                    description,
+                    start_seconds,
+                    end_seconds
+                );
+                // TODO: Add range markers to project
+            }
+            ParsedAction::CutAt { seconds } => {
+                tracing::info!("AI wants to cut at: {}s", seconds);
+                // TODO: Implement cutting
+            }
+            ParsedAction::DeleteClip { description } => {
+                tracing::info!("AI wants to delete clip: {}", description);
+                // TODO: Find and delete matching clip
+            }
+            ParsedAction::Unknown { message } => {
+                tracing::info!("AI couldn't parse: {}", message);
             }
         }
     }
