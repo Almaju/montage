@@ -1,5 +1,6 @@
 mod agent;
 mod audio;
+mod clips_panel;
 mod config;
 mod project;
 mod prompt;
@@ -7,6 +8,7 @@ mod video;
 mod waveform;
 
 use audio::AudioData;
+use clips_panel::{ClipsPanel, ClipsPanelEvent};
 use config::AppConfig;
 use gpui::*;
 use project::Project;
@@ -45,6 +47,8 @@ struct MainView {
     project: Project,
     /// Path to the current project file (if saved)
     project_path: Option<std::path::PathBuf>,
+    /// Clips panel showing all clips
+    clips_panel: Entity<ClipsPanel>,
     /// Prompt input for agentic interactions
     prompt: Entity<PromptInput>,
     /// App state
@@ -67,7 +71,26 @@ enum AppState {
 impl MainView {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = AppConfig::load();
+        let clips_panel = cx.new(|_cx| ClipsPanel::new());
         let prompt = cx.new(PromptInput::new);
+        
+        // Subscribe to clips panel events
+        cx.subscribe(&clips_panel, |this, _panel, event: &ClipsPanelEvent, cx| {
+            match event {
+                ClipsPanelEvent::SelectClip(id) => {
+                    tracing::info!("Selected clip: {}", id);
+                    // TODO: Load clip into preview
+                }
+                ClipsPanelEvent::DeleteClip(id) => {
+                    this.project.clips.retain(|c| c.id != *id);
+                    this.sync_clips_panel(cx);
+                    this.last_agent_message = Some("Clip deleted".to_string());
+                    this.last_agent_results = vec![];
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
         
         // Subscribe to prompt events
         cx.subscribe(&prompt, |this, _prompt, event: &PromptEvent, cx| {
@@ -83,6 +106,7 @@ impl MainView {
             config,
             project: Project::new("Untitled"),
             project_path: None,
+            clips_panel,
             prompt,
             state: AppState::Empty,
             video_player: None,
@@ -125,6 +149,9 @@ impl MainView {
                 {
                     self.load_video(video.path.clone(), cx);
                 }
+                
+                // Sync clips panel
+                self.sync_clips_panel(cx);
                 
                 tracing::info!("Loaded project: {}", self.project.metadata.name);
             }
@@ -172,6 +199,7 @@ impl MainView {
             
             self.last_agent_message = Some(format!("Added {} file(s) to project", attachments.len()));
             self.last_agent_results = vec![];
+            self.sync_clips_panel(cx);
             cx.notify();
             return;
         }
@@ -180,6 +208,15 @@ impl MainView {
         if !text.trim().is_empty() {
             self.process_with_agent(text, has_attachments, cx);
         }
+    }
+    
+    /// Sync the clips panel with the current project
+    fn sync_clips_panel(&mut self, cx: &mut Context<Self>) {
+        let clips = self.project.clips.clone();
+        self.clips_panel.update(cx, |panel, cx| {
+            panel.set_clips(clips);
+            cx.notify();
+        });
     }
     
     fn process_with_agent(&mut self, text: String, has_attachments: bool, cx: &mut Context<Self>) {
@@ -218,6 +255,9 @@ impl MainView {
                         // Store agent message for display
                         this.last_agent_message = Some(response.message);
                         this.last_agent_results = results;
+                        
+                        // Sync clips panel
+                        this.sync_clips_panel(cx);
                     }
                     Err(e) => {
                         tracing::error!("Agent error: {}", e);
@@ -469,27 +509,36 @@ impl Render for MainView {
                             ),
                     ),
             )
-            // Main content area
+            // Main content area (clips panel + preview/timeline)
             .child(
                 div()
                     .flex_1()
                     .flex()
-                    .flex_col()
                     .overflow_hidden()
-                    // Video preview area (top half)
-                    .child(self.render_video_preview())
-                    // Timeline area (bottom half)
+                    // Clips panel (left sidebar)
+                    .child(self.clips_panel.clone())
+                    // Video preview and timeline (right side)
                     .child(
                         div()
-                            .h(px(200.0))
-                            .border_t_1()
-                            .border_color(rgb(0x333333))
-                            .child(match &self.state {
-                                AppState::Empty => self.render_empty(cx).into_any_element(),
-                                AppState::Error(msg) => self.render_error(msg).into_any_element(),
-                                AppState::Loaded { timeline } => timeline.clone().into_any_element(),
-                                AppState::Loading => self.render_loading().into_any_element(),
-                            }),
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            // Video preview area (top half)
+                            .child(self.render_video_preview())
+                            // Timeline area (bottom half)
+                            .child(
+                                div()
+                                    .h(px(200.0))
+                                    .border_t_1()
+                                    .border_color(rgb(0x333333))
+                                    .child(match &self.state {
+                                        AppState::Empty => self.render_empty(cx).into_any_element(),
+                                        AppState::Error(msg) => self.render_error(msg).into_any_element(),
+                                        AppState::Loaded { timeline } => timeline.clone().into_any_element(),
+                                        AppState::Loading => self.render_loading().into_any_element(),
+                                    }),
+                            ),
                     ),
             )
             // Prompt input (agentic interface)
