@@ -63,6 +63,22 @@ pub enum Modification {
         new_description: String,
     },
     
+    /// Move a clip to a new position (1-indexed)
+    MoveClip {
+        /// Clip to move (by description)
+        description: String,
+        /// New position (1-indexed, "first", "last", or number)
+        position: String,
+    },
+    
+    /// Swap two clips
+    SwapClips {
+        /// First clip description
+        clip1: String,
+        /// Second clip description
+        clip2: String,
+    },
+    
     /// Add a marker/note at a timestamp
     AddMarker {
         description: String,
@@ -88,6 +104,8 @@ You receive the current project state as JSON and user commands. You respond wit
     { "type": "add_clip", "description": "intro sequence" },
     { "type": "remove_clip", "description": "old intro" },
     { "type": "update_clip", "old_description": "clip1", "new_description": "opening shot" },
+    { "type": "move_clip", "description": "intro", "position": "last" },
+    { "type": "swap_clips", "clip1": "intro", "clip2": "outro" },
     { "type": "add_marker", "description": "cut here", "time_seconds": 30.5 },
     { "type": "set_description", "description": "My vacation video" }
   ]
@@ -98,6 +116,8 @@ You receive the current project state as JSON and user commands. You respond wit
 - add_clip: Add a new clip (user will attach the file)
 - remove_clip: Remove a clip by id or description
 - update_clip: Change a clip's description
+- move_clip: Move a clip to a new position ("first", "last", or a number like "2")
+- swap_clips: Swap the positions of two clips
 - add_marker: Add a timestamp marker/note
 - set_description: Set project description
 
@@ -107,6 +127,7 @@ You receive the current project state as JSON and user commands. You respond wit
 - If the user just asks a question, respond with empty modifications: []
 - If adding a clip, just set the description - the user will attach the file
 - Keep messages concise
+- Clips are ordered in the sequence they will appear in the final video
 
 Return ONLY valid JSON, no other text."#;
 
@@ -220,6 +241,44 @@ pub fn apply_modifications(project: &mut Project, modifications: &[Modification]
                     results.push(format!("✓ Updated clip to: {}", new_description));
                 } else {
                     results.push("⚠ No matching clip found to update".to_string());
+                }
+            }
+            
+            Modification::MoveClip { description, position } => {
+                let desc_lower = description.to_lowercase();
+                if let Some(idx) = project.clips.iter().position(|c| 
+                    c.description.to_lowercase().contains(&desc_lower)
+                ) {
+                    let clip = project.clips.remove(idx);
+                    let new_pos = match position.to_lowercase().as_str() {
+                        "first" | "1" | "start" | "beginning" => 0,
+                        "last" | "end" => project.clips.len(),
+                        s => s.parse::<usize>().unwrap_or(project.clips.len()).saturating_sub(1),
+                    };
+                    let new_pos = new_pos.min(project.clips.len());
+                    project.clips.insert(new_pos, clip);
+                    results.push(format!("✓ Moved '{}' to position {}", description, new_pos + 1));
+                } else {
+                    results.push(format!("⚠ Clip '{}' not found", description));
+                }
+            }
+            
+            Modification::SwapClips { clip1, clip2 } => {
+                let clip1_lower = clip1.to_lowercase();
+                let clip2_lower = clip2.to_lowercase();
+                
+                let idx1 = project.clips.iter().position(|c| 
+                    c.description.to_lowercase().contains(&clip1_lower)
+                );
+                let idx2 = project.clips.iter().position(|c| 
+                    c.description.to_lowercase().contains(&clip2_lower)
+                );
+                
+                if let (Some(i1), Some(i2)) = (idx1, idx2) {
+                    project.clips.swap(i1, i2);
+                    results.push(format!("✓ Swapped '{}' and '{}'", clip1, clip2));
+                } else {
+                    results.push("⚠ Could not find both clips to swap".to_string());
                 }
             }
             

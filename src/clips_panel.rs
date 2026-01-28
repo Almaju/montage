@@ -7,6 +7,10 @@ pub enum ClipsPanelEvent {
     SelectClip(String),
     /// User wants to delete a clip
     DeleteClip(String),
+    /// User wants to move a clip up
+    MoveUp(String),
+    /// User wants to move a clip down
+    MoveDown(String),
 }
 
 impl EventEmitter<ClipsPanelEvent> for ClipsPanel {}
@@ -38,10 +42,15 @@ impl ClipsPanel {
         self.selected_id = id;
     }
     
-    fn render_clip(&self, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_clip(&self, clip: &Clip, index: usize, total: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let clip_id = clip.id.clone();
+        let clip_id_for_select = clip.id.clone();
         let clip_id_for_delete = clip.id.clone();
+        let clip_id_for_up = clip.id.clone();
+        let clip_id_for_down = clip.id.clone();
         let is_selected = self.selected_id.as_ref() == Some(&clip.id);
+        let is_first = index == 0;
+        let is_last = index == total - 1;
         
         let icon = match clip.media_type {
             MediaType::Video => "🎬",
@@ -66,8 +75,8 @@ impl ClipsPanel {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(0x333333)))
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                this.selected_id = Some(clip_id.clone());
-                cx.emit(ClipsPanelEvent::SelectClip(clip_id.clone()));
+                this.selected_id = Some(clip_id_for_select.clone());
+                cx.emit(ClipsPanelEvent::SelectClip(clip_id_for_select.clone()));
                 cx.notify();
             }))
             .child(
@@ -75,7 +84,7 @@ impl ClipsPanel {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    // Header with icon and description
+                    // Header with icon, description, and controls
                     .child(
                         div()
                             .flex()
@@ -86,6 +95,13 @@ impl ClipsPanel {
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    // Order number
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x555555))
+                                            .child(format!("{}.", index + 1))
+                                    )
                                     .child(div().text_sm().child(icon))
                                     .child(
                                         div()
@@ -93,6 +109,7 @@ impl ClipsPanel {
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(rgb(0xffffff))
                                             .overflow_hidden()
+                                            .max_w(px(100.0))
                                             .child(if clip.description.is_empty() {
                                                 "Untitled".to_string()
                                             } else {
@@ -100,18 +117,55 @@ impl ClipsPanel {
                                             })
                                     )
                             )
-                            // Delete button
+                            // Controls: up, down, delete
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("delete-{}", clip_id_for_delete)))
-                                    .text_xs()
-                                    .text_color(rgb(0x666666))
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(rgb(0xff6b6b)))
-                                    .child("×")
-                                    .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
-                                        cx.emit(ClipsPanelEvent::DeleteClip(clip_id_for_delete.clone()));
-                                    }))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    // Move up
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("up-{}", clip_id)))
+                                            .text_xs()
+                                            .text_color(if is_first { rgb(0x444444) } else { rgb(0x666666) })
+                                            .cursor(if is_first { CursorStyle::default() } else { CursorStyle::PointingHand })
+                                            .hover(|s| if is_first { s } else { s.text_color(rgb(0x4fc3f7)) })
+                                            .child("▲")
+                                            .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                                                if !is_first {
+                                                    cx.emit(ClipsPanelEvent::MoveUp(clip_id_for_up.clone()));
+                                                }
+                                            }))
+                                    )
+                                    // Move down
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("down-{}", clip_id_for_down.clone())))
+                                            .text_xs()
+                                            .text_color(if is_last { rgb(0x444444) } else { rgb(0x666666) })
+                                            .cursor(if is_last { CursorStyle::default() } else { CursorStyle::PointingHand })
+                                            .hover(|s| if is_last { s } else { s.text_color(rgb(0x4fc3f7)) })
+                                            .child("▼")
+                                            .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                                                if !is_last {
+                                                    cx.emit(ClipsPanelEvent::MoveDown(clip_id_for_down.clone()));
+                                                }
+                                            }))
+                                    )
+                                    // Delete
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("delete-{}", clip_id_for_delete.clone())))
+                                            .text_xs()
+                                            .text_color(rgb(0x666666))
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(rgb(0xff6b6b)))
+                                            .child("×")
+                                            .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                                                cx.emit(ClipsPanelEvent::DeleteClip(clip_id_for_delete.clone()));
+                                            }))
+                                    )
                             )
                     )
                     // File name
@@ -129,11 +183,13 @@ impl ClipsPanel {
 impl Render for ClipsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Pre-render clips to avoid closure lifetime issues
+        let total = self.clips.len();
         let clip_elements: Vec<AnyElement> = self.clips
             .iter()
-            .map(|c| self.render_clip(c, cx).into_any_element())
+            .enumerate()
+            .map(|(i, c)| self.render_clip(c, i, total, cx).into_any_element())
             .collect();
-        let clips_count = self.clips.len();
+        let clips_count = total;
         
         div()
             .h_full()

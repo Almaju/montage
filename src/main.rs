@@ -89,6 +89,24 @@ impl MainView {
                     this.last_agent_results = vec![];
                     cx.notify();
                 }
+                ClipsPanelEvent::MoveUp(id) => {
+                    if let Some(idx) = this.project.clips.iter().position(|c| c.id == *id)
+                        && idx > 0
+                    {
+                        this.project.clips.swap(idx, idx - 1);
+                        this.sync_clips_panel(cx);
+                        cx.notify();
+                    }
+                }
+                ClipsPanelEvent::MoveDown(id) => {
+                    if let Some(idx) = this.project.clips.iter().position(|c| c.id == *id)
+                        && idx < this.project.clips.len() - 1
+                    {
+                        this.project.clips.swap(idx, idx + 1);
+                        this.sync_clips_panel(cx);
+                        cx.notify();
+                    }
+                }
             }
         })
         .detach();
@@ -508,10 +526,47 @@ impl MainView {
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("main-view")
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(0x1a1a1a))
+            // Drag & drop support
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                let files: Vec<_> = paths.paths().to_vec();
+                if files.is_empty() {
+                    return;
+                }
+                
+                tracing::info!("Dropped {} file(s)", files.len());
+                
+                for file in files {
+                    let description = file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Dropped file".to_string());
+                    
+                    let clip = this.project.add_clip(description, file.clone());
+                    let media_type = clip.media_type.clone();
+                    
+                    match media_type {
+                        project::MediaType::Audio => {
+                            this.load_audio(file, cx);
+                        }
+                        project::MediaType::Video => {
+                            this.load_video(file, cx);
+                        }
+                        project::MediaType::Image => {
+                            tracing::info!("Image support coming soon");
+                        }
+                    }
+                }
+                
+                this.sync_clips_panel(cx);
+                this.last_agent_message = Some(format!("Added {} file(s) via drag & drop", paths.paths().len()));
+                this.last_agent_results = vec![];
+                cx.notify();
+            }))
             .text_color(rgb(0xffffff))
             // Header
             .child(
