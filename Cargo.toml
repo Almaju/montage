@@ -11,8 +11,7 @@ categories = ["multimedia::video", "gui"]
 
 [dependencies]
 # UI Framework (from Zed repo - crates.io version is yanked)
-# Pin to specific revision for stable macOS builds
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", rev = "v0.175.4" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -46,7 +45,7 @@ pretty_assertions = "1"
 name = "montage"
 path = "src/main.rs"
 
-# Use same patches as Zed workspace
+# Use same patches as Zed workspace for build compatibility
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
