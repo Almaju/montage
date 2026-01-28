@@ -11,14 +11,50 @@ pub struct Project {
     /// Project metadata
     pub metadata: ProjectMetadata,
     
-    /// Audio track configuration
+    /// Audio track configuration (main audio)
     pub audio: Option<AudioTrack>,
     
-    /// Video track configuration  
+    /// Video track configuration (legacy, for single video)
     pub video: Option<VideoTrack>,
+    
+    /// Media clips in the project
+    #[serde(default)]
+    pub clips: Vec<Clip>,
     
     /// Timeline state
     pub timeline: TimelineState,
+}
+
+/// A media clip with description and timing
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Clip {
+    /// Unique clip ID
+    pub id: String,
+    
+    /// User description (e.g., "introduction part")
+    pub description: String,
+    
+    /// Path to the media file
+    pub path: PathBuf,
+    
+    /// Type of media
+    pub media_type: MediaType,
+    
+    /// Start time in the timeline (seconds)
+    #[serde(default)]
+    pub start_time: f64,
+    
+    /// Duration of the clip (seconds)
+    #[serde(default)]
+    pub duration: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaType {
+    Audio,
+    Video,
+    Image,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -102,6 +138,7 @@ impl Project {
             },
             audio: None,
             video: None,
+            clips: Vec::new(),
             timeline: TimelineState::default(),
         }
     }
@@ -147,6 +184,56 @@ impl Project {
             duration: Some(duration),
             dimensions: Some(dimensions),
         });
+    }
+    
+    /// Add a clip to the project
+    pub fn add_clip(&mut self, description: String, path: PathBuf) -> &Clip {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        // Generate a simple unique ID
+        let id = format!(
+            "clip_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        
+        // Detect media type from extension
+        let media_type = match path.extension().and_then(|e| e.to_str()) {
+            Some("mp3") | Some("wav") | Some("flac") | Some("ogg") | Some("m4a") => MediaType::Audio,
+            Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") => MediaType::Image,
+            _ => MediaType::Video, // Default to video
+        };
+        
+        // Calculate start time (end of last clip)
+        let start_time = self.clips
+            .last()
+            .map(|c| c.start_time + c.duration.unwrap_or(0.0))
+            .unwrap_or(0.0);
+        
+        self.clips.push(Clip {
+            id,
+            description,
+            path,
+            media_type,
+            start_time,
+            duration: None, // Will be filled when media is loaded
+        });
+        
+        self.clips.last().unwrap()
+    }
+    
+    /// Get all video clips
+    #[allow(dead_code)]
+    pub fn video_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.clips.iter().filter(|c| c.media_type == MediaType::Video)
+    }
+    
+    /// Get all audio clips
+    #[allow(dead_code)]
+    pub fn audio_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.clips.iter().filter(|c| c.media_type == MediaType::Audio)
     }
 }
 

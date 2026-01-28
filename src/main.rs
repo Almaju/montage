@@ -1,11 +1,13 @@
 mod audio;
 mod project;
+mod prompt;
 mod video;
 mod waveform;
 
 use audio::AudioData;
 use gpui::*;
 use project::Project;
+use prompt::{Command, PromptEvent, PromptInput};
 use video::VideoPlayer;
 use waveform::{Timeline, TimelineEvent};
 
@@ -38,6 +40,8 @@ struct MainView {
     project: Project,
     /// Path to the current project file (if saved)
     project_path: Option<std::path::PathBuf>,
+    /// Prompt input for agentic interactions
+    prompt: Entity<PromptInput>,
     /// App state
     state: AppState,
     /// Video player instance
@@ -52,12 +56,64 @@ enum AppState {
 }
 
 impl MainView {
-    fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let prompt = cx.new(|_cx| PromptInput::new());
+        
+        // Subscribe to prompt events
+        cx.subscribe(&prompt, |this, _prompt, event: &PromptEvent, cx| {
+            match event {
+                PromptEvent::Submit { text, attachments } => {
+                    this.handle_prompt(text.clone(), attachments.clone(), cx);
+                }
+            }
+        })
+        .detach();
+        
         Self {
             project: Project::new("Untitled"),
             project_path: None,
+            prompt,
             state: AppState::Empty,
             video_player: None,
+        }
+    }
+    
+    fn handle_prompt(&mut self, text: String, attachments: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let command = Command::parse(&text, attachments);
+        
+        match command {
+            Command::AddMedia { description, files } => {
+                for file in files {
+                    // Add clip to project
+                    let clip = self.project.add_clip(description.clone(), file.clone());
+                    let media_type = clip.media_type.clone();
+                    
+                    tracing::info!("Added {:?} clip: {} - {}", media_type, clip.id, description);
+                    
+                    // Load the media
+                    match media_type {
+                        project::MediaType::Audio => {
+                            self.load_audio(file, cx);
+                        }
+                        project::MediaType::Video => {
+                            self.load_video(file, cx);
+                        }
+                        project::MediaType::Image => {
+                            // TODO: Handle images
+                            tracing::info!("Image support coming soon");
+                        }
+                    }
+                }
+            }
+            Command::SetName(name) => {
+                self.project.metadata.name = name;
+                cx.notify();
+            }
+            Command::Unknown(text) => {
+                if !text.is_empty() {
+                    tracing::info!("Unknown command: {}", text);
+                }
+            }
         }
     }
     
@@ -239,25 +295,6 @@ impl MainView {
         .detach();
     }
 
-    fn open_video_picker(&mut self, cx: &mut Context<Self>) {
-        let future = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Select Video File".into()),
-        });
-
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = future.await
-                && let Some(path) = paths.into_iter().next()
-            {
-                let _ = this.update(cx, |this, cx| {
-                    this.load_video(path, cx);
-                });
-            }
-        })
-        .detach();
-    }
 }
 
 impl Render for MainView {
@@ -302,7 +339,7 @@ impl Render for MainView {
                         div()
                             .flex()
                             .gap_2()
-                            // Project buttons
+                            // Project buttons only - media added via prompt
                             .child(
                                 div()
                                     .id("open-project-btn")
@@ -332,43 +369,6 @@ impl Render for MainView {
                                     .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                         this.save_project(cx);
                                     })),
-                            )
-                            // Separator
-                            .child(div().w_px().h_6().bg(rgb(0x444444)))
-                            // Media buttons
-                            .child(
-                                div()
-                                    .id("open-video-btn")
-                                    .px_4()
-                                    .py_2()
-                                    .bg(rgb(0x9c27b0))
-                                    .text_color(rgb(0xffffff))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0xba68c8)))
-                                    .active(|s| s.bg(rgb(0x7b1fa2)))
-                                    .child("Video")
-                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                        this.open_video_picker(cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("open-audio-btn")
-                                    .px_4()
-                                    .py_2()
-                                    .bg(rgb(0x4fc3f7))
-                                    .text_color(rgb(0x000000))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x81d4fa)))
-                                    .active(|s| s.bg(rgb(0x29b6f6)))
-                                    .child("Audio")
-                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                        this.open_audio_picker(cx);
-                                    })),
                             ),
                     ),
             )
@@ -395,15 +395,26 @@ impl Render for MainView {
                             }),
                     ),
             )
-            // Footer
+            // Prompt input (agentic interface)
             .child(
                 div()
                     .p_4()
                     .border_t_1()
                     .border_color(rgb(0x333333))
-                    .text_sm()
-                    .text_color(rgb(0x666666))
-                    .child("Phase 2: Video + Audio integration"),
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // Clips indicator
+                    .child(if !self.project.clips.is_empty() {
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x666666))
+                            .child(format!("📁 {} clip(s) in project", self.project.clips.len()))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .child(self.prompt.clone()),
             )
     }
 }
