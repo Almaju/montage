@@ -22,6 +22,8 @@ pub struct PromptInput {
     focus_handle: FocusHandle,
     /// Whether we're processing a command
     processing: bool,
+    /// Animation frame for thinking dots
+    thinking_frame: usize,
 }
 
 #[derive(Clone)]
@@ -37,6 +39,24 @@ impl PromptInput {
             focus_handle: cx.focus_handle(),
             text: String::new(),
             processing: false,
+            thinking_frame: 0,
+        }
+    }
+    
+    /// Get the current thinking dots animation
+    fn thinking_text(&self) -> &'static str {
+        match self.thinking_frame % 4 {
+            0 => "Thinking",
+            1 => "Thinking.",
+            2 => "Thinking..",
+            _ => "Thinking...",
+        }
+    }
+    
+    /// Advance the thinking animation
+    pub fn tick_animation(&mut self) {
+        if self.processing {
+            self.thinking_frame = self.thinking_frame.wrapping_add(1);
         }
     }
 
@@ -59,6 +79,14 @@ impl PromptInput {
     /// Set processing state
     pub fn set_processing(&mut self, processing: bool) {
         self.processing = processing;
+        if processing {
+            self.thinking_frame = 0;
+        }
+    }
+    
+    /// Check if currently processing
+    pub fn is_processing(&self) -> bool {
+        self.processing
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
@@ -157,7 +185,7 @@ impl Render for PromptInput {
             .collect();
         
         let placeholder = if self.processing {
-            "Processing..."
+            self.thinking_text()
         } else {
             "Type a command... (e.g., 'this is the intro' or 'cut at 0:30')"
         };

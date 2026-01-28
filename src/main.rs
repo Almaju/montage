@@ -23,6 +23,15 @@ use waveform::{Timeline, TimelineEvent};
 
 fn main() {
     tracing_subscriber::fmt::init();
+    
+    // Initialize GStreamer
+    if let Err(e) = gstreamer::init() {
+        tracing::error!("Failed to initialize GStreamer: {}", e);
+        eprintln!("Error: Failed to initialize GStreamer: {}", e);
+        eprintln!("Make sure GStreamer is installed on your system.");
+        return;
+    }
+    tracing::info!("GStreamer initialized");
 
     Application::new().run(|cx| {
         cx.open_window(
@@ -249,12 +258,41 @@ impl MainView {
         });
     }
     
+    /// Start the thinking dots animation
+    fn start_thinking_animation(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                // Wait 400ms between frames
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                
+                let should_continue = this.update(cx, |this, cx| {
+                    let mut is_processing = false;
+                    this.prompt.update(cx, |prompt, cx| {
+                        if prompt.is_processing() {
+                            prompt.tick_animation();
+                            is_processing = true;
+                            cx.notify();
+                        }
+                    });
+                    is_processing
+                }).unwrap_or(false);
+                
+                if !should_continue {
+                    break;
+                }
+            }
+        }).detach();
+    }
+    
     fn process_with_agent(&mut self, text: String, has_attachments: bool, cx: &mut Context<Self>) {
         // Set processing state
         self.prompt.update(cx, |prompt, cx| {
             prompt.set_processing(true);
             cx.notify();
         });
+        
+        // Start thinking animation
+        self.start_thinking_animation(cx);
         
         tracing::info!("Sending to agent: {}", text);
         
@@ -440,16 +478,26 @@ impl MainView {
                 let _ = this.update(cx, |this, cx| {
                     match export_result {
                         Ok(Ok(path)) => {
+                            tracing::info!("Export complete: {:?}", path);
                             this.last_agent_message = Some("✅ Export complete!".to_string());
                             this.last_agent_results = vec![format!("Saved to: {}", path.display())];
                         }
                         Ok(Err(e)) => {
+                            tracing::error!("Export failed: {}", e);
                             this.last_agent_message = Some("❌ Export failed".to_string());
                             this.last_agent_results = vec![format!("Error: {}", e)];
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else if let Some(s) = e.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "Unknown panic".to_string()
+                            };
+                            tracing::error!("Export crashed: {}", panic_msg);
                             this.last_agent_message = Some("❌ Export crashed".to_string());
-                            this.last_agent_results = vec![];
+                            this.last_agent_results = vec![format!("Panic: {}", panic_msg)];
                         }
                     }
                     cx.notify();
