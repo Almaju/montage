@@ -178,6 +178,7 @@ impl Project {
     }
     
     /// Set the video track
+    #[allow(dead_code)]
     pub fn set_video(&mut self, path: PathBuf, duration: f64, dimensions: (u32, u32)) {
         self.video = Some(VideoTrack {
             path,

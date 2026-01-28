@@ -5,6 +5,7 @@ mod clips_panel;
 mod config;
 mod export;
 mod pexels;
+mod player;
 mod project;
 mod prompt;
 mod startup;
@@ -12,13 +13,15 @@ mod transcription;
 mod video;
 mod waveform;
 
+use std::sync::Arc;
+
 use audio::AudioData;
 use clips_panel::{ClipsPanel, ClipsPanelEvent};
 use config::AppConfig;
 use gpui::*;
+use player::{ProjectPlayer, PlayerState};
 use project::Project;
 use prompt::{PromptEvent, PromptInput};
-use video::VideoPlayer;
 use waveform::{Timeline, TimelineEvent};
 
 fn main() {
@@ -67,8 +70,8 @@ struct MainView {
     prompt: Entity<PromptInput>,
     /// App state
     state: AppState,
-    /// Video player instance
-    video_player: Option<VideoPlayer>,
+    /// Unified project player (preview + export use same pipeline)
+    player: ProjectPlayer,
     /// Last message from the agent
     last_agent_message: Option<String>,
     /// Last modification results from the agent
@@ -147,7 +150,7 @@ impl MainView {
             clips_panel,
             prompt,
             state: AppState::Empty,
-            video_player: None,
+            player: ProjectPlayer::new(),
             last_agent_message: Some(greeting),
             last_agent_results: vec![],
             service_status,
@@ -688,9 +691,7 @@ impl MainView {
                             match event {
                                 TimelineEvent::PositionChanged(position) => {
                                     this.project.timeline.position = *position;
-                                    if let Some(ref player) = this.video_player {
-                                        player.seek(*position);
-                                    }
+                                    this.player.seek(*position);
                                 }
                             }
                         })
@@ -712,28 +713,11 @@ impl MainView {
     }
 
     fn load_video(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        let mut player = VideoPlayer::new();
-        match player.load(&path) {
-            Ok(()) => {
-                let (width, height) = player.dimensions();
-                let duration = player.duration();
-                tracing::info!(
-                    "Video loaded: {}x{}, {:.1}s",
-                    width,
-                    height,
-                    duration
-                );
-                
-                // Update project with video info
-                self.project.set_video(path, duration, (width, height));
-                
-                self.video_player = Some(player);
-            }
-            Err(e) => {
-                tracing::error!("Failed to load video: {}", e);
-                self.state = AppState::Error(format!("Failed to load video: {}", e));
-            }
-        }
+        tracing::info!("Video clip added: {:?}", path);
+        
+        // Reload the player to include the new clip
+        self.reload_player(cx);
+        
         cx.notify();
     }
 
@@ -926,7 +910,7 @@ impl Render for MainView {
                             .flex_col()
                             .overflow_hidden()
                             // Video preview area (top half)
-                            .child(self.render_video_preview())
+                            .child(self.render_video_preview(cx))
                             // Timeline area (bottom half)
                             .child(
                                 div()
@@ -1022,94 +1006,136 @@ impl Render for MainView {
 }
 
 impl MainView {
-    fn render_video_preview(&self) -> impl IntoElement {
+    fn render_video_preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_loaded = self.player.is_loaded();
+        let is_playing = self.player.state() == PlayerState::Playing;
+        let duration = self.player.duration();
+        let position = self.player.get_position();
+        
         div()
             .flex_1()
             .flex()
-            .items_center()
-            .justify_center()
+            .flex_col()
             .bg(rgb(0x0d0d0d))
-            .child(if let Some(ref player) = self.video_player {
-                let (width, height) = player.dimensions();
-                let duration = player.duration();
-                
-                // Try to get the current frame
-                if let Some(frame) = player.current_frame() {
-                    if let Some(render_image) = frame.to_render_image() {
-                        // Display actual video frame
+            // Video display area
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if is_loaded {
+                        if let Some(frame) = self.player.current_frame() {
+                            // Convert frame to image
+                            let img_buffer: Option<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>> = 
+                                image::ImageBuffer::from_raw(frame.width, frame.height, frame.data.clone());
+                            
+                            if let Some(buffer) = img_buffer {
+                                let img_frame = image::Frame::new(buffer);
+                                let render_image = Arc::new(RenderImage::new(vec![img_frame]));
+                                
+                                div()
+                                    .child(
+                                        img(render_image)
+                                            .max_w(px(800.0))
+                                            .max_h(px(400.0))
+                                            .rounded_md(),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .text_color(rgb(0x4fc3f7))
+                                    .child("🎬 Video ready")
+                                    .into_any_element()
+                            }
+                        } else {
+                            div()
+                                .text_color(rgb(0x4fc3f7))
+                                .child("🎬 Video loaded - press Play")
+                                .into_any_element()
+                        }
+                    } else {
                         div()
                             .flex()
                             .flex_col()
                             .items_center()
-                            .gap_2()
-                            .child(
-                                img(render_image)
-                                    .max_w(px(800.0))
-                                    .max_h(px(450.0))
-                                    .rounded_md(),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x666666))
-                                    .child(format!("{}×{} • {:.1}s", width, height, duration)),
-                            )
+                            .gap_4()
+                            .child(div().text_3xl().text_color(rgb(0x333333)).child("📹"))
+                            .child(div().text_color(rgb(0x555555)).child("Add video clips to preview"))
                             .into_any_element()
-                    } else {
-                        // Frame exists but couldn't convert to image
-                        self.render_video_metadata(width, height, duration)
-                    }
-                } else {
-                    // No frame yet, show metadata
-                    self.render_video_metadata(width, height, duration)
-                }
-            } else {
+                    }),
+            )
+            // Playback controls
+            .child(
                 div()
                     .flex()
-                    .flex_col()
                     .items_center()
+                    .justify_center()
                     .gap_4()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(rgb(0x333333))
+                    // Play/Pause button
                     .child(
                         div()
-                            .text_3xl()
-                            .text_color(rgb(0x333333))
-                            .child("📹"),
+                            .id("play-pause-btn")
+                            .px_4()
+                            .py_2()
+                            .bg(if is_loaded { rgb(0x4fc3f7) } else { rgb(0x333333) })
+                            .text_color(if is_loaded { rgb(0x000000) } else { rgb(0x666666) })
+                            .font_weight(FontWeight::MEDIUM)
+                            .rounded_md()
+                            .cursor(if is_loaded { CursorStyle::PointingHand } else { CursorStyle::default() })
+                            .child(if is_playing { "⏸ Pause" } else { "▶ Play" })
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                if this.player.is_loaded() {
+                                    if this.player.state() == PlayerState::Playing {
+                                        this.player.pause();
+                                    } else {
+                                        this.player.play();
+                                    }
+                                    cx.notify();
+                                }
+                            })),
                     )
+                    // Time display
                     .child(
                         div()
-                            .text_color(rgb(0x555555))
-                            .child("No video loaded"),
+                            .text_sm()
+                            .text_color(rgb(0x888888))
+                            .child(format!("{:.1}s / {:.1}s", position * duration, duration)),
                     )
-                    .into_any_element()
-            })
+                    // Reload button
+                    .child(
+                        div()
+                            .id("reload-btn")
+                            .px_3()
+                            .py_2()
+                            .bg(rgb(0x333333))
+                            .text_color(rgb(0xcccccc))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x444444)))
+                            .child("🔄 Reload")
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                this.reload_player(cx);
+                            })),
+                    ),
+            )
     }
     
-    fn render_video_metadata(&self, width: u32, height: u32, duration: f64) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_4()
-            .child(
-                div()
-                    .text_3xl()
-                    .child("🎬"),
-            )
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(rgb(0x4fc3f7))
-                    .child(format!("Video: {}×{}", width, height)),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x888888))
-                    .child(format!("Duration: {:.1}s", duration)),
-            )
-            .into_any_element()
+    /// Reload the player with current project
+    fn reload_player(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.player.load_project(&self.project) {
+            tracing::error!("Failed to load player: {}", e);
+            self.last_agent_message = Some(format!("Player error: {}", e));
+            self.last_agent_results = vec![];
+        } else {
+            tracing::info!("Player reloaded");
+        }
+        cx.notify();
     }
-
+    
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
