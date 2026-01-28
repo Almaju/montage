@@ -7,6 +7,7 @@ mod export;
 mod pexels;
 mod project;
 mod prompt;
+mod startup;
 mod transcription;
 mod video;
 mod waveform;
@@ -63,6 +64,8 @@ struct MainView {
     last_agent_message: Option<String>,
     /// Last modification results from the agent
     last_agent_results: Vec<String>,
+    /// Service status
+    service_status: startup::ServiceStatus,
 }
 
 enum AppState {
@@ -124,6 +127,10 @@ impl MainView {
         })
         .detach();
         
+        // Check service status
+        let service_status = startup::ServiceStatus::check(&config.pexels_api_key);
+        let greeting = service_status.greeting_message();
+        
         let mut view = Self {
             config,
             project: Project::new("Untitled"),
@@ -132,8 +139,9 @@ impl MainView {
             prompt,
             state: AppState::Empty,
             video_player: None,
-            last_agent_message: None,
+            last_agent_message: Some(greeting),
             last_agent_results: vec![],
+            service_status,
         };
         
         // Auto-load last project if exists
@@ -279,6 +287,7 @@ impl MainView {
                         for result in &results {
                             if let Some(key) = result.strip_prefix("🔑 PEXELS_KEY:") {
                                 this.config.set_pexels_api_key(key.to_string());
+                                this.service_status = startup::ServiceStatus::check(&this.config.pexels_api_key);
                                 display_results.push("✓ Pexels API key saved".to_string());
                             } else if result.starts_with("🎬 GENERATE_FROM_AUDIO:") {
                                 // Queue auto-video generation
@@ -775,6 +784,26 @@ impl Render for MainView {
                                     .text_sm()
                                     .text_color(rgb(0x888888))
                                     .child(format!("— {}", self.project.metadata.name)),
+                            )
+                            // Status indicators
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .ml_4()
+                                    .children(
+                                        self.service_status.status_indicators().into_iter().map(|(name, ok)| {
+                                            div()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .bg(if ok { rgb(0x2e7d32) } else { rgb(0x424242) })
+                                                .text_color(if ok { rgb(0xffffff) } else { rgb(0x888888) })
+                                                .child(name)
+                                        })
+                                    ),
                             ),
                     )
                     .child(
