@@ -10,6 +10,7 @@ use symphonia::core::probe::Hint;
 
 /// Represents loaded audio data
 #[derive(Clone)]
+#[allow(dead_code)] // Fields will be used in future phases
 pub struct AudioData {
     /// Duration in seconds
     pub duration: f64,

@@ -83,12 +83,12 @@ impl MainView {
         });
 
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = future.await {
-                if let Some(path) = paths.into_iter().next() {
-                    let _ = this.update(cx, |this, cx| {
-                        this.load_audio(path, cx);
-                    });
-                }
+            if let Ok(Ok(Some(paths))) = future.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.load_audio(path, cx);
+                });
             }
         })
         .detach();

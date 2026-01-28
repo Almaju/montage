@@ -58,8 +58,25 @@ Montage takes your audio recording and automatically generates a polished video:
 ```bash
 git clone https://github.com/Almaju/montage.git
 cd montage
+./scripts/setup.sh  # Configure git hooks & tooling
 cargo run
 ```
+
+## Development
+
+### Pre-commit Hooks
+
+This project uses pre-commit hooks to ensure code quality. The setup script configures them automatically, but you can also run manually:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Before each commit, `cargo clippy` runs to catch common mistakes and ensure the code compiles.
+
+### Code Style
+
+See [PRINCIPLES.md](PRINCIPLES.md) for coding conventions (alphabetical ordering, newtypes, etc.).
 
 ## Contributing
 
