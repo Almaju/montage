@@ -13,9 +13,6 @@ categories = ["multimedia::video", "gui"]
 # UI Framework (from Zed repo - crates.io version is yanked)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 
-# Pin core-text to match Zed's version and avoid core-graphics conflicts
-core-text = "=21.0.0"
-
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -37,12 +34,12 @@ reqwest = { version = "0.12", features = ["json"] }
 # Audio decoding
 symphonia = { version = "0.5", features = ["all"] }
 
-# Future additions (commented for now):
-# gstreamer = "0.23"  # Video processing
-# whisper-rs = "0.1"  # Audio transcription
-
 [dev-dependencies]
 pretty_assertions = "1"
+
+# macOS: Pin core-text to match Zed's version and avoid core-graphics conflicts
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = "=21.0.0"
 
 [[bin]]
 name = "montage"
