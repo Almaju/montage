@@ -270,6 +270,7 @@ impl Render for PromptInput {
 
 /// Parse a command and extract intent (fallback when Ollama unavailable)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum Command {
     /// Add media to the project with a description
     AddMedia {
@@ -284,6 +285,7 @@ pub enum Command {
     Unknown(String),
 }
 
+#[allow(dead_code)]
 impl Command {
     /// Parse a prompt submission into a command
     pub fn parse(text: &str, attachments: Vec<PathBuf>) -> Self {

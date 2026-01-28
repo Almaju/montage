@@ -1,6 +1,6 @@
+mod agent;
 mod audio;
 mod config;
-mod ollama;
 mod project;
 mod prompt;
 mod video;
@@ -10,7 +10,7 @@ use audio::AudioData;
 use config::AppConfig;
 use gpui::*;
 use project::Project;
-use prompt::{Command, PromptEvent, PromptInput};
+use prompt::{PromptEvent, PromptInput};
 use video::VideoPlayer;
 use waveform::{Timeline, TimelineEvent};
 
@@ -51,6 +51,10 @@ struct MainView {
     state: AppState,
     /// Video player instance
     video_player: Option<VideoPlayer>,
+    /// Last message from the agent
+    last_agent_message: Option<String>,
+    /// Last modification results from the agent
+    last_agent_results: Vec<String>,
 }
 
 enum AppState {
@@ -82,6 +86,8 @@ impl MainView {
             prompt,
             state: AppState::Empty,
             video_player: None,
+            last_agent_message: None,
+            last_agent_results: vec![],
         };
         
         // Auto-load last project if exists
@@ -131,59 +137,65 @@ impl MainView {
     }
     
     fn handle_prompt(&mut self, text: String, attachments: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
-        let command = Command::parse(&text, attachments);
+        let has_attachments = !attachments.is_empty();
         
-        match command {
-            Command::AddMedia { description, files } => {
-                for file in files {
-                    // Add clip to project
-                    let clip = self.project.add_clip(description.clone(), file.clone());
-                    let media_type = clip.media_type.clone();
-                    
-                    tracing::info!("Added {:?} clip: {} - {}", media_type, clip.id, description);
-                    
-                    // Load the media
-                    match media_type {
-                        project::MediaType::Audio => {
-                            self.load_audio(file, cx);
-                        }
-                        project::MediaType::Video => {
-                            self.load_video(file, cx);
-                        }
-                        project::MediaType::Image => {
-                            // TODO: Handle images
-                            tracing::info!("Image support coming soon");
-                        }
+        // If we have file attachments, add them directly
+        if has_attachments {
+            for file in &attachments {
+                // Add clip to project with the text as description
+                let description = if text.is_empty() {
+                    file.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Untitled clip".to_string())
+                } else {
+                    text.clone()
+                };
+                
+                let clip = self.project.add_clip(description, file.clone());
+                let media_type = clip.media_type.clone();
+                
+                tracing::info!("Added {:?} clip: {}", media_type, clip.description);
+                
+                // Load the media
+                match media_type {
+                    project::MediaType::Audio => {
+                        self.load_audio(file.clone(), cx);
+                    }
+                    project::MediaType::Video => {
+                        self.load_video(file.clone(), cx);
+                    }
+                    project::MediaType::Image => {
+                        tracing::info!("Image support coming soon");
                     }
                 }
             }
-            Command::SetName(name) => {
-                self.project.metadata.name = name;
-                cx.notify();
-            }
-            Command::Text(text) => {
-                // Send to Ollama for parsing
-                self.process_with_ollama(text, cx);
-            }
-            Command::Unknown(text) => {
-                if !text.is_empty() {
-                    tracing::info!("Unknown command: {}", text);
-                }
-            }
+            
+            self.last_agent_message = Some(format!("Added {} file(s) to project", attachments.len()));
+            self.last_agent_results = vec![];
+            cx.notify();
+            return;
+        }
+        
+        // If we have text but no attachments, send to agent
+        if !text.trim().is_empty() {
+            self.process_with_agent(text, has_attachments, cx);
         }
     }
     
-    fn process_with_ollama(&mut self, text: String, cx: &mut Context<Self>) {
+    fn process_with_agent(&mut self, text: String, has_attachments: bool, cx: &mut Context<Self>) {
         // Set processing state
         self.prompt.update(cx, |prompt, cx| {
             prompt.set_processing(true);
             cx.notify();
         });
         
-        tracing::info!("Sending to Ollama: {}", text);
+        tracing::info!("Sending to agent: {}", text);
+        
+        // Clone project for the async task
+        let project_clone = self.project.clone();
         
         cx.spawn(async move |this, cx| {
-            let result = ollama::parse_command(&text).await;
+            let result = agent::process_command(&project_clone, &text, has_attachments).await;
             
             let _ = this.update(cx, |this, cx| {
                 // Clear processing state
@@ -193,56 +205,30 @@ impl MainView {
                 });
                 
                 match result {
-                    Ok(action) => {
-                        tracing::info!("Ollama parsed: {:?}", action);
-                        this.handle_ollama_action(action, cx);
+                    Ok(response) => {
+                        tracing::info!("Agent response: {}", response.message);
+                        tracing::info!("Agent modifications: {:?}", response.modifications);
+                        
+                        // Apply modifications to project
+                        let results = agent::apply_modifications(&mut this.project, &response.modifications);
+                        for result in &results {
+                            tracing::info!("{}", result);
+                        }
+                        
+                        // Store agent message for display
+                        this.last_agent_message = Some(response.message);
+                        this.last_agent_results = results;
                     }
                     Err(e) => {
-                        tracing::error!("Ollama error: {}", e);
-                        // Fallback: treat as clip description if Ollama fails
-                        tracing::info!("Ollama unavailable, treating as note: {}", text);
+                        tracing::error!("Agent error: {}", e);
+                        this.last_agent_message = Some(format!("Error: {}", e));
+                        this.last_agent_results = vec![];
                     }
                 }
                 cx.notify();
             });
         })
         .detach();
-    }
-    
-    fn handle_ollama_action(&mut self, action: ollama::ParsedAction, cx: &mut Context<Self>) {
-        use ollama::ParsedAction;
-        
-        match action {
-            ParsedAction::AddClip { description } => {
-                tracing::info!("AI wants to add clip: {}", description);
-                // For now, just log - in future, could prompt for file
-            }
-            ParsedAction::SetProjectName { name } => {
-                self.project.metadata.name = name.clone();
-                tracing::info!("Project renamed to: {}", name);
-                cx.notify();
-            }
-            ParsedAction::MarkRange { description, start_seconds, end_seconds } => {
-                tracing::info!(
-                    "AI marked range '{}': {:?} - {:?}",
-                    description,
-                    start_seconds,
-                    end_seconds
-                );
-                // TODO: Add range markers to project
-            }
-            ParsedAction::CutAt { seconds } => {
-                tracing::info!("AI wants to cut at: {}s", seconds);
-                // TODO: Implement cutting
-            }
-            ParsedAction::DeleteClip { description } => {
-                tracing::info!("AI wants to delete clip: {}", description);
-                // TODO: Find and delete matching clip
-            }
-            ParsedAction::Unknown { message } => {
-                tracing::info!("AI couldn't parse: {}", message);
-            }
-        }
     }
     
     fn save_project(&mut self, cx: &mut Context<Self>) {
@@ -515,6 +501,35 @@ impl Render for MainView {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    // Agent response (if any)
+                    .child(if let Some(ref msg) = self.last_agent_message {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_3()
+                            .bg(rgb(0x252525))
+                            .rounded_md()
+                            .border_l_2()
+                            .border_color(rgb(0x4fc3f7))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xdddddd))
+                                    .child(format!("🤖 {}", msg))
+                            )
+                            .children(
+                                self.last_agent_results.iter().map(|r| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x888888))
+                                        .child(r.clone())
+                                })
+                            )
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
                     // Clips indicator
                     .child(if !self.project.clips.is_empty() {
                         div()
