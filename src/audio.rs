@@ -15,8 +15,10 @@ pub struct AudioData {
     /// Duration in seconds
     pub duration: f64,
     /// File name
+    #[allow(dead_code)]
     pub name: String,
     /// Original sample rate
+    #[allow(dead_code)]
     pub sample_rate: u32,
     /// Samples normalized to -1.0 to 1.0 range (mono, downsampled for waveform)
     pub samples: Vec<f32>,
@@ -98,7 +100,7 @@ impl AudioData {
             sample_buf.copy_interleaved_ref(decoded);
 
             let samples = sample_buf.samples();
-            
+
             // Convert to mono by averaging channels
             for chunk in samples.chunks(channels) {
                 let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;

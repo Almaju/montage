@@ -13,6 +13,9 @@ categories = ["multimedia::video", "gui"]
 # UI Framework (from Zed repo - crates.io version is yanked)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 
+# Pin core-text to match Zed's version and avoid core-graphics conflicts
+core-text = "=21.0.0"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
