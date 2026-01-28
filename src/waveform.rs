@@ -14,9 +14,8 @@ impl Waveform {
 }
 
 impl Render for Waveform {
-    fn render(&mut self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let samples = self.audio.samples.clone();
-        let duration = self.audio.duration;
 
         div()
             .w_full()
@@ -26,10 +25,10 @@ impl Render for Waveform {
             .overflow_hidden()
             .child(
                 canvas(
-                    move |_bounds, _cx| {},
-                    move |bounds, _state, cx| {
-                        let width = bounds.size.width.0;
-                        let height = bounds.size.height.0;
+                    move |_bounds, _window, _cx| {},
+                    move |bounds, _state, window, _cx| {
+                        let width: f32 = bounds.size.width.into();
+                        let height: f32 = bounds.size.height.into();
                         let center_y = height / 2.0;
                         let max_amplitude = height / 2.0 - 4.0;
 
@@ -38,13 +37,14 @@ impl Render for Waveform {
                             return;
                         }
 
-                        let samples_per_pixel = sample_count as f32 / width;
                         let bar_width = 2.0_f32;
                         let bar_gap = 1.0_f32;
                         let bar_step = bar_width + bar_gap;
                         let num_bars = (width / bar_step) as usize;
 
                         let waveform_color = rgb(0x4fc3f7);
+                        let origin_x: f32 = bounds.origin.x.into();
+                        let origin_y: f32 = bounds.origin.y.into();
 
                         for i in 0..num_bars {
                             let x = i as f32 * bar_step;
@@ -63,13 +63,13 @@ impl Render for Waveform {
 
                             let bar_bounds = Bounds {
                                 origin: point(
-                                    px(bounds.origin.x.0 + x),
-                                    px(bounds.origin.y.0 + center_y - bar_height),
+                                    px(origin_x + x),
+                                    px(origin_y + center_y - bar_height),
                                 ),
                                 size: size(px(bar_width), px(bar_height * 2.0)),
                             };
 
-                            cx.paint_quad(fill(bar_bounds, waveform_color));
+                            window.paint_quad(fill(bar_bounds, waveform_color));
                         }
                     },
                 )
@@ -81,19 +81,19 @@ impl Render for Waveform {
 /// Timeline component with waveform and time markers
 pub struct Timeline {
     duration: f64,
-    waveform: View<Waveform>,
+    waveform: Entity<Waveform>,
 }
 
 impl Timeline {
-    pub fn new(audio: AudioData, cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(audio: AudioData, cx: &mut Context<Self>) -> Self {
         let duration = audio.duration;
-        let waveform = cx.new_view(|_cx| Waveform::new(audio));
+        let waveform = cx.new(|_cx| Waveform::new(audio));
         Self { duration, waveform }
     }
 }
 
 impl Render for Timeline {
-    fn render(&mut self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let duration_str = format_duration(self.duration);
 
         div()

@@ -8,7 +8,7 @@ use waveform::Timeline;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    App::new().run(|cx: &mut AppContext| {
+    Application::new().run(|cx| {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -19,11 +19,13 @@ fn main() {
                     origin: point(px(100.0), px(100.0)),
                     size: size(px(1200.0), px(800.0)),
                 })),
+                focus: true,
                 ..Default::default()
             },
-            |cx| cx.new_view(|_cx| MainView::new()),
+            |window, cx| cx.new(|cx| MainView::new(window, cx)),
         )
         .unwrap();
+        cx.activate(true);
     });
 }
 
@@ -34,24 +36,29 @@ struct MainView {
 enum AppState {
     Empty,
     Error(String),
-    Loaded { timeline: View<Timeline> },
+    Loaded { timeline: Entity<Timeline> },
     Loading,
 }
 
 impl MainView {
-    fn load_audio(&mut self, path: std::path::PathBuf, cx: &mut ViewContext<Self>) {
+    fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        Self {
+            state: AppState::Empty,
+        }
+    }
+
+    fn load_audio(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.state = AppState::Loading;
         cx.notify();
 
-        // Load audio in background
         let path_clone = path.clone();
-        cx.spawn(|this, mut cx| async move {
+        cx.spawn(async move |this, cx| {
             let result = std::thread::spawn(move || AudioData::load(&path_clone)).join();
 
-            this.update(&mut cx, |this, cx| {
+            let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(audio)) => {
-                        let timeline = cx.new_view(|cx| Timeline::new(audio, cx));
+                        let timeline = cx.new(|cx| Timeline::new(audio, cx));
                         this.state = AppState::Loaded { timeline };
                     }
                     Ok(Err(e)) => {
@@ -62,31 +69,25 @@ impl MainView {
                     }
                 }
                 cx.notify();
-            })
+            });
         })
         .detach();
     }
 
-    fn new() -> Self {
-        Self {
-            state: AppState::Empty,
-        }
-    }
-
-    fn open_file_picker(&mut self, cx: &mut ViewContext<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
+    fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+        let future = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
+            prompt: Some("Select Audio File".into()),
         });
 
-        cx.spawn(|this, mut cx| async move {
-            if let Ok(Some(paths)) = paths.await {
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = future.await {
                 if let Some(path) = paths.into_iter().next() {
-                    this.update(&mut cx, |this, cx| {
+                    let _ = this.update(cx, |this, cx| {
                         this.load_audio(path, cx);
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -95,7 +96,7 @@ impl MainView {
 }
 
 impl Render for MainView {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -132,7 +133,7 @@ impl Render for MainView {
                             .hover(|s| s.bg(rgb(0x81d4fa)))
                             .active(|s| s.bg(rgb(0x29b6f6)))
                             .child("Open Audio")
-                            .on_click(cx.listener(|this, _event, cx| {
+                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                 this.open_file_picker(cx);
                             })),
                     ),
@@ -168,7 +169,7 @@ impl Render for MainView {
 }
 
 impl MainView {
-    fn render_empty(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -176,7 +177,7 @@ impl MainView {
             .gap_6()
             .child(
                 div()
-                    .text_6xl()
+                    .text_2xl()
                     .child("🎵"),
             )
             .child(
@@ -201,7 +202,7 @@ impl MainView {
             .rounded_xl()
             .cursor_pointer()
             .hover(|s| s.border_color(rgb(0x4fc3f7)).bg(rgb(0x1e1e1e)))
-            .on_click(cx.listener(|this, _event, cx| {
+            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                 this.open_file_picker(cx);
             }))
     }
@@ -212,7 +213,7 @@ impl MainView {
             .flex_col()
             .items_center()
             .gap_4()
-            .child(div().text_4xl().child("❌"))
+            .child(div().text_2xl().child("❌"))
             .child(
                 div()
                     .text_lg()
@@ -221,7 +222,7 @@ impl MainView {
             )
     }
 
-    fn render_loaded(&self, timeline: View<Timeline>) -> impl IntoElement {
+    fn render_loaded(&self, timeline: Entity<Timeline>) -> impl IntoElement {
         div()
             .w_full()
             .flex()
@@ -236,7 +237,7 @@ impl MainView {
             .flex_col()
             .items_center()
             .gap_4()
-            .child(div().text_4xl().child("⏳"))
+            .child(div().text_2xl().child("⏳"))
             .child(div().text_lg().text_color(rgb(0x888888)).child("Loading audio..."))
     }
 }
