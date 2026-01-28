@@ -1,4 +1,5 @@
 use gpui::*;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::audio::AudioData;
@@ -6,6 +7,8 @@ use crate::audio::AudioData;
 /// Waveform visualization component with playhead
 pub struct Waveform {
     audio: AudioData,
+    /// Cached bounds for click calculation
+    bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     /// Current playhead position (0.0 to 1.0)
     position: f64,
 }
@@ -14,6 +17,7 @@ impl Waveform {
     pub fn new(audio: AudioData) -> Self {
         Self {
             audio,
+            bounds: Arc::new(Mutex::new(None)),
             position: 0.0,
         }
     }
@@ -27,6 +31,8 @@ impl Render for Waveform {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let samples = self.audio.samples.clone();
         let position = self.position;
+        let bounds_for_paint = self.bounds.clone();
+        let bounds_for_click = self.bounds.clone();
 
         div()
             .id("waveform")
@@ -36,16 +42,27 @@ impl Render for Waveform {
             .rounded_md()
             .overflow_hidden()
             .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                // Calculate click position relative to waveform width
-                // This is a simplified version - we'd need bounds info for accurate calculation
-                this.position = 0.5; // Placeholder - will be fixed with proper bounds
-                cx.notify();
-                cx.emit(WaveformEvent::Seek(this.position));
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                // Get cached bounds and calculate relative position
+                if let Some(bounds) = *bounds_for_click.lock().unwrap() {
+                    let click_x: f32 = event.position.x.into();
+                    let origin_x: f32 = bounds.origin.x.into();
+                    let width: f32 = bounds.size.width.into();
+                    
+                    let relative_x = click_x - origin_x;
+                    let normalized = (relative_x / width).clamp(0.0, 1.0) as f64;
+                    
+                    this.position = normalized;
+                    cx.notify();
+                    cx.emit(WaveformEvent::Seek(normalized));
+                }
             }))
             .child(
                 canvas(
-                    move |_bounds, _window, _cx| {},
+                    move |bounds, _window, _cx| {
+                        // Store bounds for click calculation
+                        *bounds_for_paint.lock().unwrap() = Some(bounds);
+                    },
                     move |bounds, _state, window, _cx| {
                         let width: f32 = bounds.size.width.into();
                         let height: f32 = bounds.size.height.into();
@@ -124,10 +141,10 @@ impl EventEmitter<WaveformEvent> for Waveform {}
 /// Timeline component with waveform, controls, and time display
 pub struct Timeline {
     duration: f64,
-    /// Current position in seconds
-    position: f64,
     /// Whether audio is playing
     playing: bool,
+    /// Current position in seconds
+    position: f64,
     waveform: Entity<Waveform>,
 }
 
@@ -137,12 +154,10 @@ impl Timeline {
         let waveform = cx.new(|_cx| Waveform::new(audio));
 
         // Subscribe to waveform events
-        cx.subscribe(&waveform, |this, _waveform, event: &WaveformEvent, cx| {
-            match event {
-                WaveformEvent::Seek(position) => {
-                    this.seek(*position);
-                    cx.notify();
-                }
+        cx.subscribe(&waveform, |this, _waveform, event: &WaveformEvent, cx| match event {
+            WaveformEvent::Seek(position) => {
+                this.seek(*position);
+                cx.notify();
             }
         })
         .detach();
@@ -157,14 +172,6 @@ impl Timeline {
 
     fn seek(&mut self, normalized_position: f64) {
         self.position = normalized_position * self.duration;
-    }
-
-    fn toggle_playback(&mut self, cx: &mut Context<Self>) {
-        self.playing = !self.playing;
-        if self.playing {
-            self.start_playback_timer(cx);
-        }
-        cx.notify();
     }
 
     fn start_playback_timer(&mut self, cx: &mut Context<Self>) {
@@ -206,6 +213,14 @@ impl Timeline {
             }
         })
         .detach();
+    }
+
+    fn toggle_playback(&mut self, cx: &mut Context<Self>) {
+        self.playing = !self.playing;
+        if self.playing {
+            self.start_playback_timer(cx);
+        }
+        cx.notify();
     }
 }
 
