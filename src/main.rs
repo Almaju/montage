@@ -1,16 +1,13 @@
+mod audio;
+mod waveform;
+
+use audio::AudioData;
 use gpui::*;
-
-struct MontageApp;
-
-impl MontageApp {
-    fn new() -> Self {
-        Self
-    }
-}
+use waveform::Timeline;
 
 fn main() {
     tracing_subscriber::fmt::init();
-    
+
     App::new().run(|cx: &mut AppContext| {
         cx.open_window(
             WindowOptions {
@@ -18,54 +15,228 @@ fn main() {
                     title: Some("Montage".into()),
                     ..Default::default()
                 }),
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: point(px(100.0), px(100.0)),
+                    size: size(px(1200.0), px(800.0)),
+                })),
                 ..Default::default()
             },
-            |cx| {
-                cx.new_view(|_cx| MainView::new())
-            },
+            |cx| cx.new_view(|_cx| MainView::new()),
         )
         .unwrap();
     });
 }
 
 struct MainView {
-    status: String,
+    state: AppState,
+}
+
+enum AppState {
+    Empty,
+    Error(String),
+    Loaded { timeline: View<Timeline> },
+    Loading,
 }
 
 impl MainView {
+    fn load_audio(&mut self, path: std::path::PathBuf, cx: &mut ViewContext<Self>) {
+        self.state = AppState::Loading;
+        cx.notify();
+
+        // Load audio in background
+        let path_clone = path.clone();
+        cx.spawn(|this, mut cx| async move {
+            let result = std::thread::spawn(move || AudioData::load(&path_clone)).join();
+
+            this.update(&mut cx, |this, cx| {
+                match result {
+                    Ok(Ok(audio)) => {
+                        let timeline = cx.new_view(|cx| Timeline::new(audio, cx));
+                        this.state = AppState::Loaded { timeline };
+                    }
+                    Ok(Err(e)) => {
+                        this.state = AppState::Error(format!("Failed to load audio: {}", e));
+                    }
+                    Err(_) => {
+                        this.state = AppState::Error("Audio loading panicked".to_string());
+                    }
+                }
+                cx.notify();
+            })
+        })
+        .detach();
+    }
+
     fn new() -> Self {
         Self {
-            status: "Welcome to Montage! 🎬".to_string(),
+            state: AppState::Empty,
         }
+    }
+
+    fn open_file_picker(&mut self, cx: &mut ViewContext<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+        });
+
+        cx.spawn(|this, mut cx| async move {
+            if let Ok(Some(paths)) = paths.await {
+                if let Some(path) = paths.into_iter().next() {
+                    this.update(&mut cx, |this, cx| {
+                        this.load_audio(path, cx);
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
     }
 }
 
 impl Render for MainView {
-    fn render(&mut self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e1e))
+            .bg(rgb(0x1a1a1a))
             .text_color(rgb(0xffffff))
+            // Header
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .p_4()
-                    .text_xl()
-                    .child("Montage")
+                    .border_b_1()
+                    .border_color(rgb(0x333333))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child("🎬")
+                            .child(div().text_xl().font_weight(FontWeight::BOLD).child("Montage")),
+                    )
+                    .child(
+                        div()
+                            .id("open-btn")
+                            .px_4()
+                            .py_2()
+                            .bg(rgb(0x4fc3f7))
+                            .text_color(rgb(0x000000))
+                            .font_weight(FontWeight::MEDIUM)
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x81d4fa)))
+                            .active(|s| s.bg(rgb(0x29b6f6)))
+                            .child("Open Audio")
+                            .on_click(cx.listener(|this, _event, cx| {
+                                this.open_file_picker(cx);
+                            })),
+                    ),
             )
+            // Main content
             .child(
                 div()
                     .flex_1()
-                    .p_4()
-                    .child(&self.status)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_8()
+                    .child(match &self.state {
+                        AppState::Empty => self.render_empty(cx).into_any_element(),
+                        AppState::Error(msg) => self.render_error(msg).into_any_element(),
+                        AppState::Loaded { timeline } => {
+                            self.render_loaded(timeline.clone()).into_any_element()
+                        }
+                        AppState::Loading => self.render_loading().into_any_element(),
+                    }),
             )
+            // Footer
             .child(
                 div()
                     .p_4()
+                    .border_t_1()
+                    .border_color(rgb(0x333333))
                     .text_sm()
-                    .text_color(rgb(0x888888))
-                    .child("Phase 1: Foundation — Building the UI shell")
+                    .text_color(rgb(0x666666))
+                    .child("Phase 1: Foundation — Audio loading & waveform display"),
             )
+    }
+}
+
+impl MainView {
+    fn render_empty(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_6()
+            .child(
+                div()
+                    .text_6xl()
+                    .child("🎵"),
+            )
+            .child(
+                div()
+                    .text_xl()
+                    .text_color(rgb(0x888888))
+                    .child("Drop an audio file or click Open Audio"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x555555))
+                    .child("Supports MP3, WAV, FLAC, OGG, and more"),
+            )
+            // Drop zone
+            .id("drop-zone")
+            .w_full()
+            .max_w(px(600.0))
+            .p_12()
+            .border_2()
+            .border_color(rgb(0x333333))
+            .rounded_xl()
+            .cursor_pointer()
+            .hover(|s| s.border_color(rgb(0x4fc3f7)).bg(rgb(0x1e1e1e)))
+            .on_click(cx.listener(|this, _event, cx| {
+                this.open_file_picker(cx);
+            }))
+    }
+
+    fn render_error(&self, msg: &str) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(div().text_4xl().child("❌"))
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(0xff6b6b))
+                    .child(msg.to_string()),
+            )
+    }
+
+    fn render_loaded(&self, timeline: View<Timeline>) -> impl IntoElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(timeline)
+    }
+
+    fn render_loading(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(div().text_4xl().child("⏳"))
+            .child(div().text_lg().text_color(rgb(0x888888)).child("Loading audio..."))
     }
 }

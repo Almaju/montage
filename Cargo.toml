@@ -31,6 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # HTTP client (for LLM APIs)
 reqwest = { version = "0.12", features = ["json"] }
 
+# Audio decoding
+symphonia = { version = "0.5", features = ["all"] }
+
 # Future additions (commented for now):
 # gstreamer = "0.23"  # Video processing
 # whisper-rs = "0.1"  # Audio transcription
