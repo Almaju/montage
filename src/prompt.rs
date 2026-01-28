@@ -188,20 +188,44 @@ impl Render for PromptInput {
                         cx.notify();
                     }))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                        match &event.keystroke.key {
-                            key if key == "enter" => {
+                        let key = &event.keystroke.key;
+                        let modifiers = &event.keystroke.modifiers;
+                        
+                        // Handle Ctrl+V / Cmd+V for paste
+                        if key == "v" && (modifiers.control || modifiers.platform) {
+                            if let Some(text) = cx.read_from_clipboard()
+                                .and_then(|item| item.text().map(|s| s.to_string()))
+                            {
+                                this.text.push_str(&text);
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        
+                        // Handle Ctrl+A / Cmd+A for select all (clear and ready for new input)
+                        if key == "a" && (modifiers.control || modifiers.platform) {
+                            // Select all = we'll just highlight behavior, but for now skip
+                            return;
+                        }
+                        
+                        match key.as_str() {
+                            "enter" => {
                                 this.submit(cx);
                             }
-                            key if key == "backspace" => {
+                            "backspace" => {
                                 this.text.pop();
                                 cx.notify();
                             }
-                            key if key == "escape" => {
+                            "escape" => {
                                 this.text.clear();
                                 cx.notify();
                             }
                             _ => {
                                 // Handle regular character input via key_char
+                                // Skip if modifier keys are held (except shift)
+                                if modifiers.control || modifiers.platform || modifiers.alt {
+                                    return;
+                                }
                                 if let Some(ch) = &event.keystroke.key_char {
                                     this.text.push_str(ch);
                                     cx.notify();

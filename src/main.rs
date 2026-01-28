@@ -905,6 +905,7 @@ impl Render for MainView {
                     .gap_2()
                     // Agent response (if any)
                     .child(if let Some(ref msg) = self.last_agent_message {
+                        let msg_for_copy = msg.clone();
                         div()
                             .flex()
                             .flex_col()
@@ -916,9 +917,34 @@ impl Render for MainView {
                             .border_color(rgb(0x4fc3f7))
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(rgb(0xdddddd))
-                                    .child(format!("🤖 {}", msg))
+                                    .flex()
+                                    .justify_between()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        // Render markdown-ish content
+                                        div()
+                                            .flex_1()
+                                            .text_sm()
+                                            .text_color(rgb(0xdddddd))
+                                            .children(render_markdown_text(&format!("🤖 {}", msg)))
+                                    )
+                                    .child(
+                                        // Copy button
+                                        div()
+                                            .id("copy-response")
+                                            .px_2()
+                                            .py_1()
+                                            .text_xs()
+                                            .text_color(rgb(0x888888))
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(rgb(0x4fc3f7)).bg(rgb(0x333333)))
+                                            .rounded(px(4.0))
+                                            .child("📋")
+                                            .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(msg_for_copy.clone()));
+                                            }))
+                                    )
                             )
                             .children(
                                 self.last_agent_results.iter().map(|r| {
@@ -1110,4 +1136,104 @@ impl MainView {
                     .child(div().text_lg().text_color(rgb(0x888888)).child("Loading...")),
             )
     }
+}
+
+/// Render text with basic markdown support (bold, italic, code)
+fn render_markdown_text(text: &str) -> Vec<AnyElement> {
+    let mut elements = Vec::new();
+    let mut current_line = String::new();
+    
+    for line in text.lines() {
+        if !current_line.is_empty() {
+            elements.push(render_markdown_line(&current_line));
+            current_line.clear();
+        }
+        current_line = line.to_string();
+    }
+    
+    if !current_line.is_empty() {
+        elements.push(render_markdown_line(&current_line));
+    }
+    
+    elements
+}
+
+fn render_markdown_line(line: &str) -> AnyElement {
+    // Check for code blocks (backticks)
+    if line.contains('`') {
+        let mut parts: Vec<AnyElement> = Vec::new();
+        let mut in_code = false;
+        let mut current = String::new();
+        
+        for ch in line.chars() {
+            if ch == '`' {
+                if !current.is_empty() {
+                    if in_code {
+                        parts.push(
+                            div()
+                                .px_1()
+                                .bg(rgb(0x3a3a3a))
+                                .rounded(px(2.0))
+                                .text_color(rgb(0x81d4fa))
+                                .child(current.clone())
+                                .into_any_element()
+                        );
+                    } else {
+                        parts.push(
+                            div()
+                                .child(current.clone())
+                                .into_any_element()
+                        );
+                    }
+                    current.clear();
+                }
+                in_code = !in_code;
+            } else {
+                current.push(ch);
+            }
+        }
+        
+        if !current.is_empty() {
+            parts.push(div().child(current).into_any_element());
+        }
+        
+        return div()
+            .flex()
+            .flex_wrap()
+            .gap_0()
+            .children(parts)
+            .into_any_element();
+    }
+    
+    // Check for bold (**text**)
+    if line.contains("**") {
+        let mut parts: Vec<AnyElement> = Vec::new();
+        let mut in_bold = false;
+        let segments: Vec<&str> = line.split("**").collect();
+        
+        for segment in segments {
+            if !segment.is_empty() {
+                if in_bold {
+                    parts.push(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(segment.to_string())
+                            .into_any_element()
+                    );
+                } else {
+                    parts.push(div().child(segment.to_string()).into_any_element());
+                }
+            }
+            in_bold = !in_bold;
+        }
+        
+        return div()
+            .flex()
+            .flex_wrap()
+            .children(parts)
+            .into_any_element();
+    }
+    
+    // Plain text
+    div().child(line.to_string()).into_any_element()
 }
