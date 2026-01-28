@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::project::Project;
 
 const OLLAMA_URL: &str = "http://localhost:11434/api/generate";
-const MODEL: &str = "qwen2.5:7b";
+const MODEL: &str = "qwen2.5:3b";
 
 #[derive(Debug, Serialize)]
 struct OllamaRequest {
