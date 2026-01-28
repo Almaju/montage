@@ -1,10 +1,13 @@
 mod agent;
 mod audio;
+mod auto_video;
 mod clips_panel;
 mod config;
 mod export;
+mod pexels;
 mod project;
 mod prompt;
+mod transcription;
 mod video;
 mod waveform;
 
@@ -270,13 +273,34 @@ impl MainView {
                         
                         // Apply modifications to project
                         let results = agent::apply_modifications(&mut this.project, &response.modifications);
+                        
+                        // Process special commands from results
+                        let mut display_results = Vec::new();
                         for result in &results {
+                            if let Some(key) = result.strip_prefix("🔑 PEXELS_KEY:") {
+                                this.config.set_pexels_api_key(key.to_string());
+                                display_results.push("✓ Pexels API key saved".to_string());
+                            } else if result.starts_with("🎬 GENERATE_FROM_AUDIO:") {
+                                // Queue auto-video generation
+                                display_results.push("🎬 Starting auto-video generation...".to_string());
+                                this.start_auto_video_generation(cx);
+                            } else if let Some(info) = result.strip_prefix("🔍 SEARCH_PEXELS:") {
+                                let parts: Vec<&str> = info.split(':').collect();
+                                if parts.len() >= 2 {
+                                    let query = parts[0];
+                                    let count = parts[1].parse().unwrap_or(5);
+                                    display_results.push(format!("🔍 Searching Pexels for '{}'...", query));
+                                    this.search_pexels(query.to_string(), count, cx);
+                                }
+                            } else {
+                                display_results.push(result.clone());
+                            }
                             tracing::info!("{}", result);
                         }
                         
                         // Store agent message for display
                         this.last_agent_message = Some(response.message);
-                        this.last_agent_results = results;
+                        this.last_agent_results = display_results;
                         
                         // Sync clips panel
                         this.sync_clips_panel(cx);
@@ -422,6 +446,161 @@ impl MainView {
                     cx.notify();
                 });
             }
+        })
+        .detach();
+    }
+    
+    fn start_auto_video_generation(&mut self, cx: &mut Context<Self>) {
+        // Find the first audio clip
+        let audio_clip = self.project.clips
+            .iter()
+            .find(|c| c.media_type == project::MediaType::Audio)
+            .cloned();
+        
+        let Some(audio_clip) = audio_clip else {
+            self.last_agent_message = Some("❌ No audio clip found in project".to_string());
+            self.last_agent_results = vec!["Add an audio file first, then try again".to_string()];
+            cx.notify();
+            return;
+        };
+        
+        let Some(api_key) = self.config.pexels_api_key.clone() else {
+            self.last_agent_message = Some("❌ Pexels API key not set".to_string());
+            self.last_agent_results = vec!["Say: 'set pexels key YOUR_API_KEY'".to_string()];
+            cx.notify();
+            return;
+        };
+        
+        let audio_path = audio_clip.path.clone();
+        let output_dir = std::env::temp_dir().join("montage_auto_video");
+        
+        self.last_agent_message = Some("🎬 Generating video from audio...".to_string());
+        self.last_agent_results = vec![
+            "Step 1: Transcribing audio...".to_string(),
+        ];
+        cx.notify();
+        
+        cx.spawn(async move |this, cx| {
+            let result = std::thread::spawn(move || {
+                auto_video::generate_from_audio(&audio_path, &api_key, &output_dir)
+            }).join();
+            
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(mut auto_result)) => {
+                        // Download the clips
+                        let api_key = this.config.pexels_api_key.clone().unwrap_or_default();
+                        let output_dir = std::env::temp_dir().join("montage_auto_video");
+                        
+                        let download_result = std::thread::spawn(move || {
+                            auto_video::download_clips(&mut auto_result, &output_dir, &api_key)
+                                .map(|_| auto_result)
+                        }).join();
+                        
+                        match download_result {
+                            Ok(Ok(auto_result)) => {
+                                // Add downloaded clips to project
+                                let mut added = 0;
+                                for clip in &auto_result.clips {
+                                    if let Some(ref path) = clip.local_path {
+                                        this.project.add_clip(
+                                            format!("{} ({})", clip.query, clip.segment.text.chars().take(30).collect::<String>()),
+                                            path.clone(),
+                                        );
+                                        added += 1;
+                                    }
+                                }
+                                
+                                this.sync_clips_panel(cx);
+                                this.last_agent_message = Some("✅ Auto-video generation complete!".to_string());
+                                this.last_agent_results = vec![
+                                    format!("Transcribed: {} segments", auto_result.transcript.segments.len()),
+                                    format!("Added: {} video clips", added),
+                                    format!("Duration: {:.1}s", auto_result.transcript.duration),
+                                ];
+                            }
+                            Ok(Err(e)) => {
+                                this.last_agent_message = Some("❌ Failed to download clips".to_string());
+                                this.last_agent_results = vec![format!("Error: {}", e)];
+                            }
+                            Err(_) => {
+                                this.last_agent_message = Some("❌ Download crashed".to_string());
+                                this.last_agent_results = vec![];
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        this.last_agent_message = Some("❌ Auto-video generation failed".to_string());
+                        this.last_agent_results = vec![format!("Error: {}", e)];
+                    }
+                    Err(_) => {
+                        this.last_agent_message = Some("❌ Generation crashed".to_string());
+                        this.last_agent_results = vec![];
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    
+    fn search_pexels(&mut self, query: String, count: u32, cx: &mut Context<Self>) {
+        let Some(api_key) = self.config.pexels_api_key.clone() else {
+            self.last_agent_message = Some("❌ Pexels API key not set".to_string());
+            self.last_agent_results = vec!["Say: 'set pexels key YOUR_API_KEY'".to_string()];
+            cx.notify();
+            return;
+        };
+        
+        self.last_agent_message = Some(format!("🔍 Searching Pexels for '{}'...", query));
+        self.last_agent_results = vec![];
+        cx.notify();
+        
+        let query_clone = query.clone();
+        cx.spawn(async move |this, cx| {
+            let query_for_search = query_clone.clone();
+            let result = std::thread::spawn(move || {
+                pexels::search_videos(&api_key, &query_for_search, count)
+            }).join();
+            
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(videos)) => {
+                        if videos.is_empty() {
+                            this.last_agent_message = Some(format!("No videos found for '{}'", query_clone));
+                            this.last_agent_results = vec![];
+                        } else {
+                            this.last_agent_message = Some(format!("Found {} videos for '{}'", videos.len(), query_clone));
+                            this.last_agent_results = videos.iter()
+                                .take(5)
+                                .map(|v| format!("• {}s - {} (by {})", v.duration, v.url, v.user))
+                                .collect();
+                            
+                            // Download and add the first video
+                            if let Some(video) = videos.first() {
+                                let output_dir = std::env::temp_dir().join("montage_pexels");
+                                let _ = std::fs::create_dir_all(&output_dir);
+                                let output_path = output_dir.join(format!("{}.mp4", video.id));
+                                
+                                if pexels::download_video(video, &output_path).is_ok() {
+                                    this.project.add_clip(query_clone.clone(), output_path.clone());
+                                    this.sync_clips_panel(cx);
+                                    this.last_agent_results.push("✓ Added first result to project".to_string());
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        this.last_agent_message = Some("❌ Pexels search failed".to_string());
+                        this.last_agent_results = vec![format!("Error: {}", e)];
+                    }
+                    Err(_) => {
+                        this.last_agent_message = Some("❌ Search crashed".to_string());
+                        this.last_agent_results = vec![];
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

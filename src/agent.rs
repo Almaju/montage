@@ -88,6 +88,23 @@ pub enum Modification {
     
     /// Set project description
     SetDescription { description: String },
+    
+    /// Set Pexels API key
+    SetPexelsKey { key: String },
+    
+    /// Generate video from audio (transcribe + fetch stock footage)
+    GenerateFromAudio {
+        /// Which audio clip to use (by description)
+        #[serde(default)]
+        audio_clip: Option<String>,
+    },
+    
+    /// Search and add stock footage from Pexels
+    SearchPexels {
+        query: String,
+        #[serde(default)]
+        count: Option<u32>,
+    },
 }
 
 const SYSTEM_PROMPT: &str = r#"You are an AI video editing assistant. You help users organize their video projects.
@@ -120,6 +137,9 @@ You receive the current project state as JSON and user commands. You respond wit
 - swap_clips: Swap the positions of two clips
 - add_marker: Add a timestamp marker/note
 - set_description: Set project description
+- set_pexels_key: Set Pexels API key for stock footage {"type": "set_pexels_key", "key": "..."}
+- generate_from_audio: Transcribe audio and auto-fetch matching stock footage {"type": "generate_from_audio"}
+- search_pexels: Search Pexels for stock footage {"type": "search_pexels", "query": "sunset beach", "count": 5}
 
 ## Rules
 - Be helpful and conversational in your message
@@ -128,6 +148,8 @@ You receive the current project state as JSON and user commands. You respond wit
 - If adding a clip, just set the description - the user will attach the file
 - Keep messages concise
 - Clips are ordered in the sequence they will appear in the final video
+- For generate_from_audio, there must be an audio clip in the project
+- For Pexels features, the API key must be set first
 
 Return ONLY valid JSON, no other text."#;
 
@@ -293,6 +315,21 @@ pub fn apply_modifications(project: &mut Project, modifications: &[Modification]
             Modification::SetDescription { description } => {
                 project.metadata.description = description.clone();
                 results.push("✓ Project description updated".to_string());
+            }
+            
+            // These are handled by the UI, not here
+            Modification::SetPexelsKey { key } => {
+                results.push(format!("🔑 PEXELS_KEY:{}", key));
+            }
+            
+            Modification::GenerateFromAudio { audio_clip } => {
+                let clip_info = audio_clip.as_deref().unwrap_or("default");
+                results.push(format!("🎬 GENERATE_FROM_AUDIO:{}", clip_info));
+            }
+            
+            Modification::SearchPexels { query, count } => {
+                let n = count.unwrap_or(5);
+                results.push(format!("🔍 SEARCH_PEXELS:{}:{}", query, n));
             }
         }
     }

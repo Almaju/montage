@@ -11,6 +11,10 @@ pub struct AppConfig {
     /// Recent projects (most recent first)
     #[serde(default)]
     pub recent_projects: Vec<PathBuf>,
+    
+    /// Pexels API key for stock footage
+    #[serde(default)]
+    pub pexels_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -67,5 +71,19 @@ impl AppConfig {
         if let Err(e) = self.save() {
             tracing::warn!("Failed to save config: {}", e);
         }
+    }
+    
+    /// Set the Pexels API key
+    pub fn set_pexels_api_key(&mut self, key: String) {
+        self.pexels_api_key = Some(key);
+        if let Err(e) = self.save() {
+            tracing::warn!("Failed to save config: {}", e);
+        }
+    }
+    
+    /// Check if Pexels API key is configured
+    #[allow(dead_code)]
+    pub fn has_pexels_key(&self) -> bool {
+        self.pexels_api_key.as_ref().is_some_and(|k| !k.is_empty())
     }
 }
