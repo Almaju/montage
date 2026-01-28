@@ -138,6 +138,14 @@ pub enum WaveformEvent {
 
 impl EventEmitter<WaveformEvent> for Waveform {}
 
+/// Events emitted by Timeline
+pub enum TimelineEvent {
+    /// Position changed (normalized 0.0 to 1.0)
+    PositionChanged(f64),
+}
+
+impl EventEmitter<TimelineEvent> for Timeline {}
+
 /// Timeline component with waveform, controls, and time display
 pub struct Timeline {
     duration: f64,
@@ -156,7 +164,7 @@ impl Timeline {
         // Subscribe to waveform events
         cx.subscribe(&waveform, |this, _waveform, event: &WaveformEvent, cx| match event {
             WaveformEvent::Seek(position) => {
-                this.seek(*position);
+                this.seek(*position, cx);
                 cx.notify();
             }
         })
@@ -170,8 +178,9 @@ impl Timeline {
         }
     }
 
-    fn seek(&mut self, normalized_position: f64) {
+    fn seek(&mut self, normalized_position: f64, cx: &mut Context<Self>) {
         self.position = normalized_position * self.duration;
+        cx.emit(TimelineEvent::PositionChanged(normalized_position));
     }
 
     fn start_playback_timer(&mut self, cx: &mut Context<Self>) {

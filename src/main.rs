@@ -5,7 +5,7 @@ mod waveform;
 use audio::AudioData;
 use gpui::*;
 use video::VideoPlayer;
-use waveform::Timeline;
+use waveform::{Timeline, TimelineEvent};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -63,6 +63,19 @@ impl MainView {
                 match result {
                     Ok(Ok(audio)) => {
                         let timeline = cx.new(|cx| Timeline::new(audio, cx));
+                        
+                        // Subscribe to timeline position changes to sync video
+                        cx.subscribe(&timeline, |this, _timeline, event: &TimelineEvent, _cx| {
+                            match event {
+                                TimelineEvent::PositionChanged(position) => {
+                                    if let Some(ref player) = this.video_player {
+                                        player.seek(*position);
+                                    }
+                                }
+                            }
+                        })
+                        .detach();
+                        
                         this.state = AppState::Loaded { timeline };
                     }
                     Ok(Err(e)) => {
