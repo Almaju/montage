@@ -1,10 +1,12 @@
 mod audio;
+mod config;
 mod project;
 mod prompt;
 mod video;
 mod waveform;
 
 use audio::AudioData;
+use config::AppConfig;
 use gpui::*;
 use project::Project;
 use prompt::{Command, PromptEvent, PromptInput};
@@ -36,6 +38,8 @@ fn main() {
 }
 
 struct MainView {
+    /// App configuration (persisted)
+    config: AppConfig,
     /// Current project
     project: Project,
     /// Path to the current project file (if saved)
@@ -57,6 +61,7 @@ enum AppState {
 
 impl MainView {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let config = AppConfig::load();
         let prompt = cx.new(|_cx| PromptInput::new());
         
         // Subscribe to prompt events
@@ -69,13 +74,59 @@ impl MainView {
         })
         .detach();
         
-        Self {
+        let mut view = Self {
+            config,
             project: Project::new("Untitled"),
             project_path: None,
             prompt,
             state: AppState::Empty,
             video_player: None,
+        };
+        
+        // Auto-load last project if exists
+        if let Some(ref last_project) = view.config.last_project.clone()
+            && last_project.exists()
+        {
+            tracing::info!("Auto-loading last project: {:?}", last_project);
+            view.load_project_from_path(last_project.clone(), cx);
         }
+        
+        view
+    }
+    
+    /// Load a project from a specific path
+    fn load_project_from_path(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        match Project::load(&path) {
+            Ok(project) => {
+                self.project = project;
+                self.project_path = Some(path.clone());
+                self.state = AppState::Empty;
+                
+                // Update config with this project
+                self.config.set_last_project(path);
+                
+                // Load audio if specified in project
+                if let Some(ref audio) = self.project.audio
+                    && audio.path.exists()
+                {
+                    self.load_audio(audio.path.clone(), cx);
+                }
+                
+                // Load video if specified in project
+                if let Some(ref video) = self.project.video
+                    && video.path.exists()
+                {
+                    self.load_video(video.path.clone(), cx);
+                }
+                
+                tracing::info!("Loaded project: {}", self.project.metadata.name);
+            }
+            Err(e) => {
+                tracing::error!("Failed to load project: {}", e);
+                self.state = AppState::Error(format!("Failed to open: {}", e));
+            }
+        }
+        cx.notify();
     }
     
     fn handle_prompt(&mut self, text: String, attachments: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
@@ -152,6 +203,9 @@ impl MainView {
                     if let Err(e) = this.project.save(&path) {
                         tracing::error!("Failed to save project: {}", e);
                         this.state = AppState::Error(format!("Failed to save: {}", e));
+                    } else {
+                        // Update config with saved project
+                        this.config.set_last_project(path);
                     }
                     cx.notify();
                 });
@@ -173,27 +227,7 @@ impl MainView {
                 && let Some(path) = paths.into_iter().next()
             {
                 let _ = this.update(cx, |this, cx| {
-                    match Project::load(&path) {
-                        Ok(project) => {
-                            this.project = project;
-                            this.project_path = Some(path);
-                            this.state = AppState::Empty;
-                            
-                            // Load audio if specified in project
-                            if let Some(ref audio) = this.project.audio {
-                                this.load_audio(audio.path.clone(), cx);
-                            }
-                            
-                            // Load video if specified in project
-                            if let Some(ref video) = this.project.video {
-                                this.load_video(video.path.clone(), cx);
-                            }
-                        }
-                        Err(e) => {
-                            this.state = AppState::Error(format!("Failed to open: {}", e));
-                        }
-                    }
-                    cx.notify();
+                    this.load_project_from_path(path, cx);
                 });
             }
         })
