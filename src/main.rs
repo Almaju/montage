@@ -266,29 +266,37 @@ impl MainView {
             .child(if let Some(ref player) = self.video_player {
                 let (width, height) = player.dimensions();
                 let duration = player.duration();
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_4()
-                    .child(
+                
+                // Try to get the current frame
+                if let Some(frame) = player.current_frame() {
+                    if let Some(render_image) = frame.to_render_image() {
+                        // Display actual video frame
                         div()
-                            .text_3xl()
-                            .child("🎬"),
-                    )
-                    .child(
-                        div()
-                            .text_lg()
-                            .text_color(rgb(0x4fc3f7))
-                            .child(format!("Video: {}×{}", width, height)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x888888))
-                            .child(format!("Duration: {:.1}s", duration)),
-                    )
-                    .into_any_element()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                img(render_image)
+                                    .max_w(px(800.0))
+                                    .max_h(px(450.0))
+                                    .rounded_md(),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x666666))
+                                    .child(format!("{}×{} • {:.1}s", width, height, duration)),
+                            )
+                            .into_any_element()
+                    } else {
+                        // Frame exists but couldn't convert to image
+                        self.render_video_metadata(width, height, duration)
+                    }
+                } else {
+                    // No frame yet, show metadata
+                    self.render_video_metadata(width, height, duration)
+                }
             } else {
                 div()
                     .flex()
@@ -308,6 +316,32 @@ impl MainView {
                     )
                     .into_any_element()
             })
+    }
+    
+    fn render_video_metadata(&self, width: u32, height: u32, duration: f64) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .text_3xl()
+                    .child("🎬"),
+            )
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(0x4fc3f7))
+                    .child(format!("Video: {}×{}", width, height)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x888888))
+                    .child(format!("Duration: {:.1}s", duration)),
+            )
+            .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {

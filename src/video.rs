@@ -4,6 +4,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use gpui::*;
+use image::{ImageBuffer, Rgba};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +15,22 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
     pub height: u32,
     pub width: u32,
+}
+
+#[allow(dead_code)]
+impl VideoFrame {
+    /// Convert frame data to an image::Frame for gpui rendering
+    pub fn to_image_frame(&self) -> Option<image::Frame> {
+        let img_buffer: ImageBuffer<Rgba<u8>, Vec<u8>> = 
+            ImageBuffer::from_raw(self.width, self.height, self.data.clone())?;
+        Some(image::Frame::new(img_buffer))
+    }
+    
+    /// Create a RenderImage for use with gpui's img() element
+    pub fn to_render_image(&self) -> Option<Arc<RenderImage>> {
+        let frame = self.to_image_frame()?;
+        Some(Arc::new(RenderImage::new(vec![frame])))
+    }
 }
 
 /// Video player using GStreamer
