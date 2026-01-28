@@ -110,8 +110,8 @@ You receive the current project state as JSON and user commands. You respond wit
 
 Return ONLY valid JSON, no other text."#;
 
-/// Process a user command with project context
-pub async fn process_command(project: &Project, user_input: &str, has_attachments: bool) -> Result<AgentResponse> {
+/// Process a user command with project context (blocking - runs in thread)
+pub fn process_command_blocking(project: &Project, user_input: &str, has_attachments: bool) -> Result<AgentResponse> {
     // Serialize project to give context
     let project_json = serde_json::to_string_pretty(project)
         .context("Failed to serialize project")?;
@@ -134,13 +134,13 @@ pub async fn process_command(project: &Project, user_input: &str, has_attachment
         format: "json".to_string(),
     };
 
-    let client = reqwest::Client::new();
+    // Use blocking client to avoid Tokio runtime conflict with GPUI
+    let client = reqwest::blocking::Client::new();
     let response = client
         .post(OLLAMA_URL)
         .json(&request)
         .timeout(std::time::Duration::from_secs(60))
         .send()
-        .await
         .context("Failed to connect to Ollama. Is it running? (ollama serve)")?;
 
     if !response.status().is_success() {
@@ -149,7 +149,6 @@ pub async fn process_command(project: &Project, user_input: &str, has_attachment
 
     let ollama_response: OllamaResponse = response
         .json()
-        .await
         .context("Failed to parse Ollama response")?;
 
     tracing::debug!("Ollama raw response: {}", ollama_response.response);

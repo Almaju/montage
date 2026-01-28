@@ -228,11 +228,14 @@ impl MainView {
         
         tracing::info!("Sending to agent: {}", text);
         
-        // Clone project for the async task
+        // Clone project for the blocking task
         let project_clone = self.project.clone();
         
         cx.spawn(async move |this, cx| {
-            let result = agent::process_command(&project_clone, &text, has_attachments).await;
+            // Run blocking HTTP request in a separate thread
+            let result = std::thread::spawn(move || {
+                agent::process_command_blocking(&project_clone, &text, has_attachments)
+            }).join();
             
             let _ = this.update(cx, |this, cx| {
                 // Clear processing state
@@ -242,7 +245,7 @@ impl MainView {
                 });
                 
                 match result {
-                    Ok(response) => {
+                    Ok(Ok(response)) => {
                         tracing::info!("Agent response: {}", response.message);
                         tracing::info!("Agent modifications: {:?}", response.modifications);
                         
@@ -259,9 +262,14 @@ impl MainView {
                         // Sync clips panel
                         this.sync_clips_panel(cx);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::error!("Agent error: {}", e);
                         this.last_agent_message = Some(format!("Error: {}", e));
+                        this.last_agent_results = vec![];
+                    }
+                    Err(_) => {
+                        tracing::error!("Agent thread panicked");
+                        this.last_agent_message = Some("Error: Agent crashed".to_string());
                         this.last_agent_results = vec![];
                     }
                 }
