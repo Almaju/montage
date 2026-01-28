@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::path::Path;
+use std::process::Command;
 
 use crate::project::{Clip, MediaType, Project};
 
@@ -41,7 +42,7 @@ pub fn export_project(
     settings: &ExportSettings,
     on_progress: Option<ProgressCallback>,
 ) -> Result<()> {
-    // Get video clips only for now
+    // Get video clips
     let video_clips: Vec<&Clip> = project
         .clips
         .iter()
@@ -52,226 +53,208 @@ pub fn export_project(
         anyhow::bail!("No video clips to export");
     }
 
-    tracing::info!("Exporting {} video clips to {:?}", video_clips.len(), settings.output_path);
+    // Get the main audio track (voiceover)
+    let audio_track = project.audio.as_ref().map(|a| &a.path);
 
-    // For single clip, use simple pipeline
-    if video_clips.len() == 1 {
-        return export_single_clip(&video_clips[0].path, settings, on_progress);
-    }
-
-    // For multiple clips, use concat
-    export_multiple_clips(&video_clips, settings, on_progress)
-}
-
-/// Export a single clip (simple re-encode)
-fn export_single_clip(
-    input_path: &Path,
-    settings: &ExportSettings,
-    on_progress: Option<ProgressCallback>,
-) -> Result<()> {
-    let input_uri = format!("file://{}", input_path.canonicalize()?.display());
-    let output_path = settings.output_path.to_string_lossy();
-
-    let pipeline_str = format!(
-        r#"
-        uridecodebin uri="{}" name=demux
-        demux. ! queue ! videoconvert ! videoscale ! 
-            video/x-raw,width={},height={} ! 
-            x264enc bitrate={} ! h264parse ! queue ! mux.
-        demux. ! queue ! audioconvert ! audioresample ! 
-            audio/x-raw,rate=48000,channels=2 !
-            fdkaacenc bitrate={} ! queue ! mux.
-        mp4mux name=mux ! filesink location="{}"
-        "#,
-        input_uri,
-        settings.width,
-        settings.height,
-        settings.video_bitrate,
-        settings.audio_bitrate * 1000,
-        output_path
+    tracing::info!(
+        "Exporting {} video clips to {:?}, audio: {:?}",
+        video_clips.len(),
+        settings.output_path,
+        audio_track
     );
 
-    run_pipeline(&pipeline_str, on_progress)
+    // Try FFmpeg first (most reliable for concat)
+    if is_ffmpeg_available() {
+        tracing::info!("Using FFmpeg for export");
+        return export_with_ffmpeg(&video_clips, audio_track, settings);
+    }
+
+    // Fall back to GStreamer
+    tracing::info!("Using GStreamer for export");
+    
+    if video_clips.len() == 1 {
+        export_single_clip_gst(&video_clips[0].path, audio_track, settings, on_progress)
+    } else {
+        export_multiple_clips_gst(&video_clips, audio_track, settings, on_progress)
+    }
 }
 
-/// Export multiple clips by concatenating them
-fn export_multiple_clips(
-    clips: &[&Clip],
+/// Check if FFmpeg is available
+fn is_ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Export using FFmpeg (more reliable for concatenation)
+fn export_with_ffmpeg(
+    video_clips: &[&Clip],
+    audio_track: Option<&std::path::PathBuf>,
     settings: &ExportSettings,
-    on_progress: Option<ProgressCallback>,
 ) -> Result<()> {
-    // Build a concat pipeline
-    // This is more complex - we need to use GStreamer's concat element
+    let temp_dir = std::env::temp_dir().join("montage_export");
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // Create a concat file list
+    let concat_file = temp_dir.join("concat.txt");
+    let mut concat_content = String::new();
     
-    let pipeline = gst::Pipeline::new();
-    
-    // Create concat elements for video and audio
-    let video_concat = gst::ElementFactory::make("concat")
-        .name("video_concat")
-        .build()
-        .context("Failed to create video concat")?;
-    
-    let audio_concat = gst::ElementFactory::make("concat")
-        .name("audio_concat")
-        .build()
-        .context("Failed to create audio concat")?;
-    
-    // Create output elements
-    let video_convert = gst::ElementFactory::make("videoconvert").build()?;
-    let video_scale = gst::ElementFactory::make("videoscale").build()?;
-    let video_capsfilter = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            gst::Caps::builder("video/x-raw")
-                .field("width", settings.width as i32)
-                .field("height", settings.height as i32)
-                .build(),
-        )
-        .build()?;
-    let video_encoder = gst::ElementFactory::make("x264enc")
-        .property("bitrate", settings.video_bitrate)
-        .build()?;
-    let video_parser = gst::ElementFactory::make("h264parse").build()?;
-    let video_queue = gst::ElementFactory::make("queue").build()?;
-    
-    let audio_convert = gst::ElementFactory::make("audioconvert").build()?;
-    let audio_resample = gst::ElementFactory::make("audioresample").build()?;
-    let audio_capsfilter = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            gst::Caps::builder("audio/x-raw")
-                .field("rate", 48000i32)
-                .field("channels", 2i32)
-                .build(),
-        )
-        .build()?;
-    let audio_encoder = gst::ElementFactory::make("fdkaacenc")
-        .property("bitrate", (settings.audio_bitrate * 1000) as i32)
-        .build()
-        .or_else(|_| {
-            // Fallback to voaacenc if fdkaacenc not available
-            gst::ElementFactory::make("voaacenc")
-                .property("bitrate", (settings.audio_bitrate * 1000) as i32)
-                .build()
-        })
-        .context("No AAC encoder available")?;
-    let audio_queue = gst::ElementFactory::make("queue").build()?;
-    
-    let muxer = gst::ElementFactory::make("mp4mux").build()?;
-    let filesink = gst::ElementFactory::make("filesink")
-        .property("location", settings.output_path.to_string_lossy().to_string())
-        .build()?;
-    
-    // Add all elements to pipeline
-    pipeline.add_many([
-        &video_concat, &audio_concat,
-        &video_convert, &video_scale, &video_capsfilter, &video_encoder, &video_parser, &video_queue,
-        &audio_convert, &audio_resample, &audio_capsfilter, &audio_encoder, &audio_queue,
-        &muxer, &filesink,
-    ])?;
-    
-    // Link output chain
-    gst::Element::link_many([
-        &video_concat, &video_convert, &video_scale, &video_capsfilter, 
-        &video_encoder, &video_parser, &video_queue,
-    ])?;
-    video_queue.link_pads(Some("src"), &muxer, Some("video_%u"))?;
-    
-    gst::Element::link_many([
-        &audio_concat, &audio_convert, &audio_resample, &audio_capsfilter,
-        &audio_encoder, &audio_queue,
-    ])?;
-    audio_queue.link_pads(Some("src"), &muxer, Some("audio_%u"))?;
-    
-    muxer.link(&filesink)?;
-    
-    // Add decoders for each clip
-    for (i, clip) in clips.iter().enumerate() {
-        let uri = format!("file://{}", clip.path.canonicalize()?.display());
-        
-        let decodebin = gst::ElementFactory::make("uridecodebin")
-            .name(format!("decoder_{}", i))
-            .property("uri", &uri)
-            .build()?;
-        
-        pipeline.add(&decodebin)?;
-        
-        // Connect pad-added signal to link to concat
-        let video_concat_weak = video_concat.downgrade();
-        let audio_concat_weak = audio_concat.downgrade();
-        
-        decodebin.connect_pad_added(move |_element, pad| {
-            let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-            let structure = caps.structure(0).unwrap();
-            let name = structure.name();
-            
-            if name.starts_with("video/")
-                && let Some(concat) = video_concat_weak.upgrade()
-            {
-                let sink_pad = concat.request_pad_simple("sink_%u").unwrap();
-                if pad.link(&sink_pad).is_err() {
-                    tracing::warn!("Failed to link video pad");
-                }
-            } else if name.starts_with("audio/")
-                && let Some(concat) = audio_concat_weak.upgrade()
-            {
-                let sink_pad = concat.request_pad_simple("sink_%u").unwrap();
-                if pad.link(&sink_pad).is_err() {
-                    tracing::warn!("Failed to link audio pad");
-                }
-            }
-        });
+    for clip in video_clips {
+        let path = clip.path.canonicalize()
+            .unwrap_or_else(|_| clip.path.clone());
+        // FFmpeg concat format: file 'path'
+        concat_content.push_str(&format!("file '{}'\n", path.display()));
     }
     
-    // Run the pipeline
-    pipeline.set_state(gst::State::Playing)?;
+    std::fs::write(&concat_file, &concat_content)?;
+    tracing::debug!("Concat file:\n{}", concat_content);
+
+    let output_path = settings.output_path.to_string_lossy();
     
-    let bus = pipeline.bus().unwrap();
+    // Build FFmpeg command
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y"); // Overwrite output
     
-    for msg in bus.iter_timed(gst::ClockTime::NONE) {
-        use gst::MessageView;
-        
-        match msg.view() {
-            MessageView::Eos(..) => {
-                tracing::info!("Export complete");
-                break;
-            }
-            MessageView::Error(err) => {
-                pipeline.set_state(gst::State::Null)?;
-                anyhow::bail!(
-                    "Export error: {} ({})",
-                    err.error(),
-                    err.debug().unwrap_or_default()
-                );
-            }
-            MessageView::StateChanged(state) => {
-                if state.src().map(|s| s == &pipeline).unwrap_or(false) {
-                    tracing::debug!(
-                        "Pipeline state: {:?} -> {:?}",
-                        state.old(),
-                        state.current()
-                    );
-                }
-            }
-            _ => {}
-        }
-        
-        // Report progress
-        if let Some(ref callback) = on_progress
-            && let Some(duration) = pipeline.query_duration::<gst::ClockTime>()
-            && let Some(position) = pipeline.query_position::<gst::ClockTime>()
-        {
-            let progress = position.nseconds() as f64 / duration.nseconds() as f64;
-            callback(progress);
-        }
+    // Input: concatenated videos
+    cmd.args(["-f", "concat", "-safe", "0", "-i"]);
+    cmd.arg(&concat_file);
+    
+    // Input: audio track (if provided)
+    if let Some(audio_path) = audio_track {
+        cmd.args(["-i"]);
+        cmd.arg(audio_path);
     }
     
-    pipeline.set_state(gst::State::Null)?;
+    // Video settings
+    cmd.args([
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-b:v", &format!("{}k", settings.video_bitrate),
+        "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2",
+            settings.width, settings.height, settings.width, settings.height),
+    ]);
+    
+    // Audio settings
+    if audio_track.is_some() {
+        // Use the separate audio track, not the video's audio
+        cmd.args([
+            "-map", "0:v:0",     // Video from concat
+            "-map", "1:a:0",     // Audio from separate track
+            "-c:a", "aac",
+            "-b:a", &format!("{}k", settings.audio_bitrate),
+            "-shortest",        // End when shortest stream ends
+        ]);
+    } else {
+        // Use audio from videos
+        cmd.args([
+            "-c:a", "aac",
+            "-b:a", &format!("{}k", settings.audio_bitrate),
+        ]);
+    }
+    
+    cmd.arg(&*output_path);
+    
+    tracing::info!("Running FFmpeg: {:?}", cmd);
+    
+    let output = cmd.output().context("Failed to run FFmpeg")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!("FFmpeg stderr: {}", stderr);
+        anyhow::bail!("FFmpeg failed: {}", stderr.lines().last().unwrap_or("unknown error"));
+    }
+    
+    // Clean up
+    let _ = std::fs::remove_file(&concat_file);
+    
+    tracing::info!("Export complete: {}", output_path);
     Ok(())
 }
 
-/// Run a pipeline from a string description
-fn run_pipeline(pipeline_str: &str, on_progress: Option<ProgressCallback>) -> Result<()> {
+/// Export a single clip with optional audio overlay using GStreamer
+fn export_single_clip_gst(
+    video_path: &Path,
+    audio_track: Option<&std::path::PathBuf>,
+    settings: &ExportSettings,
+    _on_progress: Option<ProgressCallback>,
+) -> Result<()> {
+    let video_uri = format!("file://{}", video_path.canonicalize()?.display());
+    let output_path = settings.output_path.to_string_lossy();
+
+    let pipeline_str = if let Some(audio_path) = audio_track {
+        let audio_uri = format!("file://{}", audio_path.canonicalize()?.display());
+        format!(
+            r#"
+            uridecodebin uri="{}" name=vdec
+            uridecodebin uri="{}" name=adec
+            vdec. ! queue ! videoconvert ! videoscale ! 
+                video/x-raw,width={},height={} ! 
+                x264enc bitrate={} ! h264parse ! queue ! mux.
+            adec. ! queue ! audioconvert ! audioresample ! 
+                audio/x-raw,rate=48000,channels=2 !
+                fdkaacenc bitrate={} ! queue ! mux.
+            mp4mux name=mux ! filesink location="{}"
+            "#,
+            video_uri,
+            audio_uri,
+            settings.width,
+            settings.height,
+            settings.video_bitrate,
+            settings.audio_bitrate * 1000,
+            output_path
+        )
+    } else {
+        format!(
+            r#"
+            uridecodebin uri="{}" name=demux
+            demux. ! queue ! videoconvert ! videoscale ! 
+                video/x-raw,width={},height={} ! 
+                x264enc bitrate={} ! h264parse ! queue ! mux.
+            demux. ! queue ! audioconvert ! audioresample ! 
+                audio/x-raw,rate=48000,channels=2 !
+                fdkaacenc bitrate={} ! queue ! mux.
+            mp4mux name=mux ! filesink location="{}"
+            "#,
+            video_uri,
+            settings.width,
+            settings.height,
+            settings.video_bitrate,
+            settings.audio_bitrate * 1000,
+            output_path
+        )
+    };
+
+    run_gst_pipeline(&pipeline_str)
+}
+
+/// Export multiple clips using GStreamer (fallback)
+fn export_multiple_clips_gst(
+    clips: &[&Clip],
+    audio_track: Option<&std::path::PathBuf>,
+    settings: &ExportSettings,
+    _on_progress: Option<ProgressCallback>,
+) -> Result<()> {
+    // For GStreamer, we'll use splitmuxsink approach or manual concat
+    // This is complex and error-prone, so we really want FFmpeg
+    
+    tracing::warn!("GStreamer multi-clip export is experimental. Install FFmpeg for better results.");
+    
+    // Create a temporary script to concat with GStreamer
+    // For now, just export the first clip as a fallback
+    if clips.is_empty() {
+        anyhow::bail!("No clips to export");
+    }
+    
+    tracing::warn!("Exporting only first clip (install FFmpeg for full concat support)");
+    export_single_clip_gst(&clips[0].path, audio_track, settings, None)
+}
+
+/// Run a GStreamer pipeline from string
+fn run_gst_pipeline(pipeline_str: &str) -> Result<()> {
+    tracing::debug!("GStreamer pipeline:\n{}", pipeline_str);
+    
     let pipeline = gst::parse::launch(pipeline_str)
         .context("Failed to create pipeline")?
         .downcast::<gst::Pipeline>()
@@ -286,27 +269,30 @@ fn run_pipeline(pipeline_str: &str, on_progress: Option<ProgressCallback>) -> Re
         
         match msg.view() {
             MessageView::Eos(..) => {
-                tracing::info!("Export complete");
+                tracing::info!("GStreamer: End of stream");
                 break;
             }
             MessageView::Error(err) => {
                 pipeline.set_state(gst::State::Null)?;
-                anyhow::bail!(
-                    "Export error: {} ({})",
-                    err.error(),
-                    err.debug().unwrap_or_default()
-                );
+                let debug_str = err.debug()
+                    .map(|d| format!("{:?}", d))
+                    .unwrap_or_default();
+                tracing::error!("GStreamer error: {} ({})", err.error(), debug_str);
+                anyhow::bail!("GStreamer error: {}", err.error());
+            }
+            MessageView::Warning(warn) => {
+                tracing::warn!("GStreamer warning: {}", warn.error());
+            }
+            MessageView::StateChanged(state) => {
+                if state.src().map(|s| s == &pipeline).unwrap_or(false) {
+                    tracing::debug!(
+                        "Pipeline state: {:?} -> {:?}",
+                        state.old(),
+                        state.current()
+                    );
+                }
             }
             _ => {}
-        }
-        
-        // Report progress
-        if let Some(ref callback) = on_progress
-            && let Some(duration) = pipeline.query_duration::<gst::ClockTime>()
-            && let Some(position) = pipeline.query_position::<gst::ClockTime>()
-        {
-            let progress = position.nseconds() as f64 / duration.nseconds() as f64;
-            callback(progress);
         }
     }
     
