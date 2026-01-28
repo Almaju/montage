@@ -1,4 +1,5 @@
 mod audio;
+mod video;
 mod waveform;
 
 use audio::AudioData;
