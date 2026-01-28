@@ -1,9 +1,11 @@
 mod audio;
+mod project;
 mod video;
 mod waveform;
 
 use audio::AudioData;
 use gpui::*;
+use project::Project;
 use video::VideoPlayer;
 use waveform::{Timeline, TimelineEvent};
 
@@ -32,7 +34,13 @@ fn main() {
 }
 
 struct MainView {
+    /// Current project
+    project: Project,
+    /// Path to the current project file (if saved)
+    project_path: Option<std::path::PathBuf>,
+    /// App state
     state: AppState,
+    /// Video player instance
     video_player: Option<VideoPlayer>,
 }
 
@@ -46,15 +54,101 @@ enum AppState {
 impl MainView {
     fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
+            project: Project::new("Untitled"),
+            project_path: None,
             state: AppState::Empty,
             video_player: None,
         }
+    }
+    
+    fn save_project(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref path) = self.project_path {
+            // Save to existing path
+            if let Err(e) = self.project.save(path) {
+                tracing::error!("Failed to save project: {}", e);
+                self.state = AppState::Error(format!("Failed to save: {}", e));
+                cx.notify();
+            }
+        } else {
+            // Prompt for save location
+            self.save_project_as(cx);
+        }
+    }
+    
+    fn save_project_as(&mut self, cx: &mut Context<Self>) {
+        let suggested_name = format!(
+            "{}.{}",
+            self.project.metadata.name,
+            Project::EXTENSION
+        );
+        
+        // Use home directory as default save location
+        let home_dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        
+        let future = cx.prompt_for_new_path(&home_dir, Some(&suggested_name));
+        
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = future.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.project_path = Some(path.clone());
+                    if let Err(e) = this.project.save(&path) {
+                        tracing::error!("Failed to save project: {}", e);
+                        this.state = AppState::Error(format!("Failed to save: {}", e));
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+    
+    fn open_project(&mut self, cx: &mut Context<Self>) {
+        let future = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open Project".into()),
+        });
+        
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = future.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    match Project::load(&path) {
+                        Ok(project) => {
+                            this.project = project;
+                            this.project_path = Some(path);
+                            this.state = AppState::Empty;
+                            
+                            // Load audio if specified in project
+                            if let Some(ref audio) = this.project.audio {
+                                this.load_audio(audio.path.clone(), cx);
+                            }
+                            
+                            // Load video if specified in project
+                            if let Some(ref video) = this.project.video {
+                                this.load_video(video.path.clone(), cx);
+                            }
+                        }
+                        Err(e) => {
+                            this.state = AppState::Error(format!("Failed to open: {}", e));
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn load_audio(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.state = AppState::Loading;
         cx.notify();
 
+        let path_for_project = path.clone();
         let path_clone = path.clone();
         cx.spawn(async move |this, cx| {
             let result = std::thread::spawn(move || AudioData::load(&path_clone)).join();
@@ -62,12 +156,20 @@ impl MainView {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(audio)) => {
+                        // Update project with audio info
+                        this.project.set_audio(
+                            path_for_project,
+                            audio.duration,
+                            audio.sample_rate,
+                        );
+                        
                         let timeline = cx.new(|cx| Timeline::new(audio, cx));
                         
                         // Subscribe to timeline position changes to sync video
                         cx.subscribe(&timeline, |this, _timeline, event: &TimelineEvent, _cx| {
                             match event {
                                 TimelineEvent::PositionChanged(position) => {
+                                    this.project.timeline.position = *position;
                                     if let Some(ref player) = this.video_player {
                                         player.seek(*position);
                                     }
@@ -103,6 +205,10 @@ impl MainView {
                     height,
                     duration
                 );
+                
+                // Update project with video info
+                self.project.set_video(path, duration, (width, height));
+                
                 self.video_player = Some(player);
             }
             Err(e) => {
@@ -175,14 +281,61 @@ impl Render for MainView {
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child("🎬")
-                            .child(div().text_xl().font_weight(FontWeight::BOLD).child("Montage")),
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child("🎬")
+                                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("Montage")),
+                            )
+                            // Project name
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0x888888))
+                                    .child(format!("— {}", self.project.metadata.name)),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .gap_2()
+                            // Project buttons
+                            .child(
+                                div()
+                                    .id("open-project-btn")
+                                    .px_3()
+                                    .py_2()
+                                    .bg(rgb(0x333333))
+                                    .text_color(rgb(0xcccccc))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x444444)))
+                                    .child("Open")
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                        this.open_project(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("save-project-btn")
+                                    .px_3()
+                                    .py_2()
+                                    .bg(rgb(0x333333))
+                                    .text_color(rgb(0xcccccc))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x444444)))
+                                    .child("Save")
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                        this.save_project(cx);
+                                    })),
+                            )
+                            // Separator
+                            .child(div().w_px().h_6().bg(rgb(0x444444)))
+                            // Media buttons
                             .child(
                                 div()
                                     .id("open-video-btn")
@@ -195,7 +348,7 @@ impl Render for MainView {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(0xba68c8)))
                                     .active(|s| s.bg(rgb(0x7b1fa2)))
-                                    .child("Open Video")
+                                    .child("Video")
                                     .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                         this.open_video_picker(cx);
                                     })),
@@ -212,7 +365,7 @@ impl Render for MainView {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(0x81d4fa)))
                                     .active(|s| s.bg(rgb(0x29b6f6)))
-                                    .child("Open Audio")
+                                    .child("Audio")
                                     .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                         this.open_audio_picker(cx);
                                     })),
