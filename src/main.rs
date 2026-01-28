@@ -4,6 +4,7 @@ mod waveform;
 
 use audio::AudioData;
 use gpui::*;
+use video::VideoPlayer;
 use waveform::Timeline;
 
 fn main() {
@@ -32,6 +33,7 @@ fn main() {
 
 struct MainView {
     state: AppState,
+    video_player: Option<VideoPlayer>,
 }
 
 enum AppState {
@@ -45,6 +47,7 @@ impl MainView {
     fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
             state: AppState::Empty,
+            video_player: None,
         }
     }
 
@@ -75,7 +78,29 @@ impl MainView {
         .detach();
     }
 
-    fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+    fn load_video(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let mut player = VideoPlayer::new();
+        match player.load(&path) {
+            Ok(()) => {
+                let (width, height) = player.dimensions();
+                let duration = player.duration();
+                tracing::info!(
+                    "Video loaded: {}x{}, {:.1}s",
+                    width,
+                    height,
+                    duration
+                );
+                self.video_player = Some(player);
+            }
+            Err(e) => {
+                tracing::error!("Failed to load video: {}", e);
+                self.state = AppState::Error(format!("Failed to load video: {}", e));
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_audio_picker(&mut self, cx: &mut Context<Self>) {
         let future = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -89,6 +114,26 @@ impl MainView {
             {
                 let _ = this.update(cx, |this, cx| {
                     this.load_audio(path, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn open_video_picker(&mut self, cx: &mut Context<Self>) {
+        let future = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select Video File".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = future.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.load_video(path, cx);
                 });
             }
         })
@@ -123,38 +168,66 @@ impl Render for MainView {
                     )
                     .child(
                         div()
-                            .id("open-btn")
-                            .px_4()
-                            .py_2()
-                            .bg(rgb(0x4fc3f7))
-                            .text_color(rgb(0x000000))
-                            .font_weight(FontWeight::MEDIUM)
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x81d4fa)))
-                            .active(|s| s.bg(rgb(0x29b6f6)))
-                            .child("Open Audio")
-                            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                                this.open_file_picker(cx);
-                            })),
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("open-video-btn")
+                                    .px_4()
+                                    .py_2()
+                                    .bg(rgb(0x9c27b0))
+                                    .text_color(rgb(0xffffff))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0xba68c8)))
+                                    .active(|s| s.bg(rgb(0x7b1fa2)))
+                                    .child("Open Video")
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                        this.open_video_picker(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("open-audio-btn")
+                                    .px_4()
+                                    .py_2()
+                                    .bg(rgb(0x4fc3f7))
+                                    .text_color(rgb(0x000000))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x81d4fa)))
+                                    .active(|s| s.bg(rgb(0x29b6f6)))
+                                    .child("Open Audio")
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                        this.open_audio_picker(cx);
+                                    })),
+                            ),
                     ),
             )
-            // Main content
+            // Main content area
             .child(
                 div()
                     .flex_1()
                     .flex()
-                    .items_center()
-                    .justify_center()
-                    .p_8()
-                    .child(match &self.state {
-                        AppState::Empty => self.render_empty(cx).into_any_element(),
-                        AppState::Error(msg) => self.render_error(msg).into_any_element(),
-                        AppState::Loaded { timeline } => {
-                            self.render_loaded(timeline.clone()).into_any_element()
-                        }
-                        AppState::Loading => self.render_loading().into_any_element(),
-                    }),
+                    .flex_col()
+                    .overflow_hidden()
+                    // Video preview area (top half)
+                    .child(self.render_video_preview())
+                    // Timeline area (bottom half)
+                    .child(
+                        div()
+                            .h(px(200.0))
+                            .border_t_1()
+                            .border_color(rgb(0x333333))
+                            .child(match &self.state {
+                                AppState::Empty => self.render_empty(cx).into_any_element(),
+                                AppState::Error(msg) => self.render_error(msg).into_any_element(),
+                                AppState::Loaded { timeline } => timeline.clone().into_any_element(),
+                                AppState::Loading => self.render_loading().into_any_element(),
+                            }),
+                    ),
             )
             // Footer
             .child(
@@ -164,81 +237,138 @@ impl Render for MainView {
                     .border_color(rgb(0x333333))
                     .text_sm()
                     .text_color(rgb(0x666666))
-                    .child("Phase 1: Foundation — Audio loading & waveform display"),
+                    .child("Phase 2: Video + Audio integration"),
             )
     }
 }
 
 impl MainView {
+    fn render_video_preview(&self) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(0x0d0d0d))
+            .child(if let Some(ref player) = self.video_player {
+                let (width, height) = player.dimensions();
+                let duration = player.duration();
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_3xl()
+                            .child("🎬"),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(rgb(0x4fc3f7))
+                            .child(format!("Video: {}×{}", width, height)),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x888888))
+                            .child(format!("Duration: {:.1}s", duration)),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_3xl()
+                            .text_color(rgb(0x333333))
+                            .child("📹"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x555555))
+                            .child("No video loaded"),
+                    )
+                    .into_any_element()
+            })
+    }
+
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .size_full()
             .flex()
-            .flex_col()
             .items_center()
-            .gap_6()
+            .justify_center()
             .child(
                 div()
-                    .text_2xl()
-                    .child("🎵"),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .text_color(rgb(0x333333))
+                            .child("🎵"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x555555))
+                            .child("Load audio to see waveform"),
+                    )
+                    .id("audio-drop-zone")
+                    .p_8()
+                    .border_2()
+                    .border_color(rgb(0x333333))
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(rgb(0x4fc3f7)).bg(rgb(0x1e1e1e)))
+                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                        this.open_audio_picker(cx);
+                    })),
             )
-            .child(
-                div()
-                    .text_xl()
-                    .text_color(rgb(0x888888))
-                    .child("Drop an audio file or click Open Audio"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x555555))
-                    .child("Supports MP3, WAV, FLAC, OGG, and more"),
-            )
-            // Drop zone
-            .id("drop-zone")
-            .w_full()
-            .max_w(px(600.0))
-            .p_12()
-            .border_2()
-            .border_color(rgb(0x333333))
-            .rounded_xl()
-            .cursor_pointer()
-            .hover(|s| s.border_color(rgb(0x4fc3f7)).bg(rgb(0x1e1e1e)))
-            .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
-                this.open_file_picker(cx);
-            }))
     }
 
     fn render_error(&self, msg: &str) -> impl IntoElement {
         div()
+            .size_full()
             .flex()
-            .flex_col()
             .items_center()
-            .gap_4()
-            .child(div().text_2xl().child("❌"))
+            .justify_center()
             .child(
                 div()
-                    .text_lg()
-                    .text_color(rgb(0xff6b6b))
-                    .child(msg.to_string()),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(div().text_2xl().child("❌"))
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(rgb(0xff6b6b))
+                            .child(msg.to_string()),
+                    ),
             )
-    }
-
-    fn render_loaded(&self, timeline: Entity<Timeline>) -> impl IntoElement {
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(timeline)
     }
 
     fn render_loading(&self) -> impl IntoElement {
         div()
+            .size_full()
             .flex()
-            .flex_col()
             .items_center()
-            .gap_4()
-            .child(div().text_2xl().child("⏳"))
-            .child(div().text_lg().text_color(rgb(0x888888)).child("Loading audio..."))
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(div().text_2xl().child("⏳"))
+                    .child(div().text_lg().text_color(rgb(0x888888)).child("Loading...")),
+            )
     }
 }
