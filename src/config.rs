@@ -21,13 +21,12 @@ impl AppConfig {
     /// Maximum number of recent projects to remember
     const MAX_RECENT: usize = 10;
     
-    /// Get the config file path
+    /// Get the config file path (~/.montage/config.json)
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-            .context("Could not find config directory")?;
+        let home_dir = dirs::home_dir()
+            .context("Could not find home directory")?;
         
-        let montage_dir = config_dir.join("montage");
+        let montage_dir = home_dir.join(".montage");
         std::fs::create_dir_all(&montage_dir)?;
         
         Ok(montage_dir.join("config.json"))
