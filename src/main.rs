@@ -2,6 +2,7 @@ mod agent;
 mod audio;
 mod clips_panel;
 mod config;
+mod export;
 mod project;
 mod prompt;
 mod video;
@@ -344,6 +345,68 @@ impl MainView {
         })
         .detach();
     }
+    
+    fn start_export(&mut self, cx: &mut Context<Self>) {
+        // Check if we have clips to export
+        let video_clips: Vec<_> = self.project.clips
+            .iter()
+            .filter(|c| c.media_type == project::MediaType::Video)
+            .collect();
+        
+        if video_clips.is_empty() {
+            self.last_agent_message = Some("No video clips to export. Add some videos first!".to_string());
+            self.last_agent_results = vec![];
+            cx.notify();
+            return;
+        }
+        
+        // Prompt for output location
+        let default_name = format!("{}.mp4", self.project.metadata.name);
+        let home_dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        
+        let future = cx.prompt_for_new_path(&home_dir, Some(&default_name));
+        let project_clone = self.project.clone();
+        
+        self.last_agent_message = Some("Starting export...".to_string());
+        self.last_agent_results = vec![];
+        cx.notify();
+        
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(output_path))) = future.await {
+                // Run export in a separate thread
+                let export_result = std::thread::spawn(move || {
+                    let settings = export::ExportSettings {
+                        output_path: output_path.clone(),
+                        ..Default::default()
+                    };
+                    
+                    export::export_project(&project_clone, &settings, None)
+                        .map(|_| output_path)
+                }).join();
+                
+                let _ = this.update(cx, |this, cx| {
+                    match export_result {
+                        Ok(Ok(path)) => {
+                            this.last_agent_message = Some("✅ Export complete!".to_string());
+                            this.last_agent_results = vec![format!("Saved to: {}", path.display())];
+                        }
+                        Ok(Err(e)) => {
+                            this.last_agent_message = Some("❌ Export failed".to_string());
+                            this.last_agent_results = vec![format!("Error: {}", e)];
+                        }
+                        Err(_) => {
+                            this.last_agent_message = Some("❌ Export crashed".to_string());
+                            this.last_agent_results = vec![];
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
 
     fn load_audio(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.state = AppState::Loading;
@@ -513,6 +576,25 @@ impl Render for MainView {
                                     .child("Save")
                                     .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                                         this.save_project(cx);
+                                    })),
+                            )
+                            // Separator
+                            .child(div().w_px().h_6().bg(rgb(0x444444)))
+                            // Export button
+                            .child(
+                                div()
+                                    .id("export-btn")
+                                    .px_4()
+                                    .py_2()
+                                    .bg(rgb(0x4caf50))
+                                    .text_color(rgb(0xffffff))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x66bb6a)))
+                                    .child("Export")
+                                    .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+                                        this.start_export(cx);
                                     })),
                             ),
                     ),
